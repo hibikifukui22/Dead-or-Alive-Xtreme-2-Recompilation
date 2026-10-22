@@ -1,9 +1,9 @@
 // DOAX2 Recomp launcher (public release).
 //
-// A single custom-drawn window the size of the background art (scaled down
-// when the screen is smaller). Three pages: the main page (logo, frame rate,
-// Play, Settings / Graphics Settings), Settings and Graphics Settings, each
-// with a Back button. Everything is laid out in a 1024 x 1024 design space and
+// A single custom-drawn, resizable window (opens at 1600 x 900). Three pages:
+// the main page (logo, frame rate, Play, Settings / Graphics Settings),
+// Settings and Graphics Settings, each with a Back button. Everything is laid
+// out in a 1600 x 900 design space, scaled uniformly with the window, and
 // drawn with GDI+; the background and logo are embedded as RCDATA resources.
 // Settings are stored in config\launcher.ini next to the launcher, the game is
 // read from "extracted game files here" and saves go to userdata.
@@ -40,7 +40,8 @@ using namespace Gdiplus;
 
 constexpr const wchar_t* kVersion = L"v1.0.0";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
-constexpr float kDesign = 1024.0f;  // design space and background size
+constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
+constexpr float kDesignH = 900.0f;
 
 // Frame rate modes (values kept compatible with earlier launcher.ini files).
 constexpr int kMode30 = 30;
@@ -78,7 +79,6 @@ std::vector<HitArea> g_hits;
 int g_hover = -1;
 std::wstring g_status;
 bool g_status_error = false;
-float g_scale = 1.0f;
 std::unique_ptr<Bitmap> g_background;
 std::unique_ptr<Bitmap> g_logo;
 
@@ -394,15 +394,15 @@ void DrawToggle(Graphics& g, const RectF& r, bool* value) {
   LinearGradientBrush fill(PointF(0, r.Y), PointF(0, r.Y + r.Height), top, bottom);
   fill.SetWrapMode(WrapModeTileFlipXY);
   g.FillPath(&fill, &path);
-  Pen border(WithAlpha(kWhite, 200), 2.0f);
+  Pen border(WithAlpha(kWhite, 200), 2.5f);
   g.DrawPath(&border, &path);
-  const float knob = r.Height - 8;
-  const float x = *value ? r.X + r.Width - knob - 4 : r.X + 4;
+  const float knob = r.Height - 10;
+  const float x = *value ? r.X + r.Width - knob - 5 : r.X + 5;
   SolidBrush knob_brush(kWhite);
-  g.FillEllipse(&knob_brush, x, r.Y + 4, knob, knob);
-  RectF text = *value ? RectF(r.X + 10, r.Y, r.Width - knob - 18, r.Height)
-                      : RectF(r.X + knob + 10, r.Y, r.Width - knob - 18, r.Height);
-  DrawText(g, *value ? L"ON" : L"OFF", text, 17, true, *value ? kNavy : kWhite, StringAlignmentCenter,
+  g.FillEllipse(&knob_brush, x, r.Y + 5, knob, knob);
+  RectF text = *value ? RectF(r.X + 12, r.Y, r.Width - knob - 22, r.Height)
+                      : RectF(r.X + knob + 12, r.Y, r.Width - knob - 22, r.Height);
+  DrawText(g, *value ? L"ON" : L"OFF", text, 24, true, *value ? kNavy : kWhite, StringAlignmentCenter,
            StringAlignmentCenter, !*value);
 }
 
@@ -413,9 +413,9 @@ void DrawSelector(Graphics& g, const RectF& r, const std::wstring& value, std::f
   LinearGradientBrush fill(PointF(0, r.Y), PointF(0, r.Y + r.Height), kOcean, kDeepBlue);
   fill.SetWrapMode(WrapModeTileFlipXY);
   g.FillPath(&fill, &path);
-  Pen border(WithAlpha(kWhite, 190), 2.0f);
+  Pen border(WithAlpha(kWhite, 190), 2.5f);
   g.DrawPath(&border, &path);
-  const float arrow = r.Height;
+  const float arrow = r.Height * 1.1f;
   RectF left(r.X, r.Y, arrow, r.Height), right(r.X + r.Width - arrow, r.Y, arrow, r.Height);
   RectF middle(r.X + arrow, r.Y, r.Width - 2 * arrow, r.Height);
   const int left_id = AddHit(left, [step] { step(-1); SaveSettings(); });
@@ -424,37 +424,37 @@ void DrawSelector(Graphics& g, const RectF& r, const std::wstring& value, std::f
   for (auto [rect, id] : {std::pair{left, left_id}, std::pair{right, right_id}}) {
     if (id == g_hover) {
       SolidBrush glow(Color(70, 255, 255, 255));
-      g.FillEllipse(&glow, rect.X + 6, rect.Y + 6, rect.Width - 12, rect.Height - 12);
+      g.FillEllipse(&glow, rect.X + 7, rect.Y + 7, rect.Width - 14, rect.Height - 14);
     }
   }
-  DrawText(g, L"‹", left, 30, true, kWhite);
-  DrawText(g, L"›", right, 30, true, kWhite);
-  DrawText(g, value, middle, 18, true, middle_id == g_hover ? Lighter(kLime, 0.3f) : kWhite);
+  DrawText(g, L"‹", left, 42, true, kWhite);
+  DrawText(g, L"›", right, 42, true, kWhite);
+  DrawText(g, value, middle, 24, true, middle_id == g_hover ? Lighter(kLime, 0.3f) : kWhite);
 }
 
 void DrawPanel(Graphics& g, const RectF& r) {
   GraphicsPath path;
-  RoundedRect(path, r, 26);
+  RoundedRect(path, r, 32);
   SolidBrush fill(Color(205, 8, 36, 84));
   g.FillPath(&fill, &path);
-  Pen border(Color(150, 120, 200, 255), 2.0f);
+  Pen border(Color(150, 120, 200, 255), 2.5f);
   g.DrawPath(&border, &path);
 }
 
 void DrawLogo(Graphics& g, float width, float y) {
   if (!g_logo) return;
   const float height = width * float(g_logo->GetHeight()) / float(g_logo->GetWidth());
-  g.DrawImage(g_logo.get(), RectF((kDesign - width) / 2, y, width, height));
+  g.DrawImage(g_logo.get(), RectF((kDesignW - width) / 2, y, width, height));
 }
 
 void DrawStatus(Graphics& g, float y) {
   if (g_status.empty()) return;
-  RectF r(152, y, 720, 44);
+  RectF r(280, y, 1040, 58);
   GraphicsPath path;
-  RoundedRect(path, r, 22);
+  RoundedRect(path, r, 29);
   SolidBrush fill(g_status_error ? Color(215, 150, 20, 60) : Color(190, 8, 36, 84));
   g.FillPath(&fill, &path);
-  DrawText(g, g_status, RectF(r.X + 16, r.Y, r.Width - 32, r.Height), 16, true, kWhite);
+  DrawText(g, g_status, RectF(r.X + 20, r.Y, r.Width - 40, r.Height), 22, true, kWhite);
 }
 
 // One settings row: title and explanation on the left, control on the right.
@@ -464,20 +464,31 @@ struct Row {
   std::function<void(Graphics&, const RectF&)> control;
 };
 
-void DrawRows(Graphics& g, const std::vector<Row>& rows, float top, float row_height) {
+struct RowStyle {
+  float height;
+  float title_size;
+  float explanation_size;
+};
+
+void DrawRows(Graphics& g, const std::vector<Row>& rows, float top, const RowStyle& style) {
   for (size_t i = 0; i < rows.size(); ++i) {
-    const float y = top + row_height * float(i);
+    const float y = top + style.height * float(i);
     if (i) {
-      Pen line(Color(70, 160, 210, 255), 1.0f);
-      g.DrawLine(&line, 104.0f, y, 920.0f, y);
+      Pen line(Color(70, 160, 210, 255), 1.5f);
+      g.DrawLine(&line, 186.0f, y, 1414.0f, y);
     }
-    DrawText(g, rows[i].title, RectF(108, y + 10, 540, 28), 21, true, kWhite, StringAlignmentNear,
-             StringAlignmentNear);
-    DrawText(g, rows[i].explanation, RectF(108, y + 38, 540, row_height - 44), 14.5f, false,
-             Color(255, 205, 228, 250), StringAlignmentNear, StringAlignmentNear, false);
-    rows[i].control(g, RectF(668, y + (row_height - 48) / 2, 252, 48));
+    const float title_height = style.title_size + 10;
+    DrawText(g, rows[i].title, RectF(192, y + 8, 830, title_height), style.title_size, true, kWhite,
+             StringAlignmentNear, StringAlignmentNear);
+    DrawText(g, rows[i].explanation, RectF(192, y + 8 + title_height, 830, style.height - title_height - 12),
+             style.explanation_size, false, Color(255, 205, 228, 250), StringAlignmentNear, StringAlignmentNear,
+             false);
+    const float control_height = std::min(62.0f, style.height - 22);
+    rows[i].control(g, RectF(1046, y + (style.height - control_height) / 2, 372, control_height));
   }
 }
+
+RectF ToggleRect(const RectF& r) { return RectF(r.X + r.Width - 172, r.Y, 172, r.Height); }
 
 template <typename T>
 void StepOption(T& value, const std::vector<T>& options, int direction) {
@@ -488,35 +499,31 @@ void StepOption(T& value, const std::vector<T>& options, int direction) {
 }
 
 void PaintMain(Graphics& g) {
-  DrawLogo(g, 600, 22);
-  DrawText(g, L"FRAME RATE", RectF(312, 318, 400, 26), 17, true, kWhite);
+  DrawLogo(g, 660, 16);
+  DrawText(g, L"FRAME RATE", RectF(560, 352, 480, 34), 24, true, kWhite);
   const auto option = [](bool selected) { return selected ? ButtonStyle::kSelected : ButtonStyle::kUnselected; };
-  DrawButton(g, RectF(322, 348, 182, 56), L"30 FPS", 24, [] {
+  DrawButton(g, RectF(544, 392, 246, 76), L"30 FPS", 33, [] {
     g_settings.frame_rate_mode = kMode30; SaveSettings();
   }, option(g_settings.frame_rate_mode == kMode30));
-  DrawButton(g, RectF(520, 348, 182, 56), L"60 FPS", 24, [] {
+  DrawButton(g, RectF(810, 392, 246, 76), L"60 FPS", 33, [] {
     g_settings.frame_rate_mode = kMode60; SaveSettings();
   }, option(g_settings.frame_rate_mode == kMode60));
-  DrawButton(g, RectF(332, 432, 360, 104), L"PLAY", 46, [] { Launch(nullptr); }, ButtonStyle::kAccent);
-  DrawStatus(g, 556);
-  // Darken the bottom of the art behind the page buttons.
-  LinearGradientBrush fade(PointF(0, 810), PointF(0, kDesign + 2), Color(0, 8, 36, 84), Color(170, 8, 36, 84));
-  fade.SetWrapMode(WrapModeTileFlipXY);
-  g.FillRectangle(&fade, 0.0f, 820.0f, kDesign, kDesign - 820.0f);
-  DrawButton(g, RectF(152, 902, 340, 66), L"SETTINGS", 24, [] { g_page = Page::kSettings; });
-  DrawButton(g, RectF(532, 902, 340, 66), L"GRAPHICS SETTINGS", 24, [] { g_page = Page::kGraphics; });
-  DrawText(g, kVersion, RectF(884, 984, 124, 30), 15, true, kWhite, StringAlignmentFar);
+  DrawButton(g, RectF(550, 494, 500, 140), L"PLAY", 66, [] { Launch(nullptr); }, ButtonStyle::kAccent);
+  DrawStatus(g, 656);
+  DrawButton(g, RectF(318, 770, 450, 92), L"SETTINGS", 33, [] { g_page = Page::kSettings; });
+  DrawButton(g, RectF(832, 770, 450, 92), L"GRAPHICS SETTINGS", 33, [] { g_page = Page::kGraphics; });
+  DrawText(g, kVersion, RectF(1380, 858, 204, 38), 21, true, kWhite, StringAlignmentFar);
 }
 
-void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& rows, float row_height,
-                  float extra_bottom = 0) {
-  DrawLogo(g, 330, 14);
-  DrawText(g, title, RectF(0, 182, kDesign, 44), 30, true, kWhite);
-  const float top = 240;
-  DrawPanel(g, RectF(72, top, 880, row_height * float(rows.size()) + 24 + extra_bottom));
-  DrawRows(g, rows, top + 12, row_height);
-  DrawButton(g, RectF(72, 904, 220, 62), L"‹  BACK", 24, [] { g_page = Page::kMain; });
-  DrawText(g, L"Changes are saved automatically.", RectF(312, 904, 640, 62), 15, false, kWhite,
+void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& rows, const RowStyle& style,
+                  float logo_width, float title_y) {
+  DrawLogo(g, logo_width, 6);
+  DrawText(g, title, RectF(0, title_y, kDesignW, 50), 40, true, kWhite);
+  const float top = title_y + 56;
+  DrawPanel(g, RectF(150, top, 1300, style.height * float(rows.size()) + 24));
+  DrawRows(g, rows, top + 12, style);
+  DrawButton(g, RectF(150, 812, 290, 76), L"‹  BACK", 33, [] { g_page = Page::kMain; });
+  DrawText(g, L"Changes are saved automatically.", RectF(460, 812, 990, 76), 21, false, kWhite,
            StringAlignmentFar);
 }
 
@@ -526,20 +533,20 @@ void PaintSettings(Graphics& g) {
       {L"Keep song playing across scenes",
        L"The current song plays to its end instead of restarting on every scene change, minigame or event. "
        L"Pre-rendered movies and the title screen still stop the music.",
-       [&s](Graphics& g, const RectF& r) { DrawToggle(g, RectF(r.X + r.Width - 132, r.Y, 132, r.Height), &s.keep_song); }},
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.keep_song); }},
       {L"Show FPS overlay",
        L"Shows the current frame rate in the corner of the game window.",
-       [&s](Graphics& g, const RectF& r) { DrawToggle(g, RectF(r.X + r.Width - 132, r.Y, 132, r.Height), &s.fps_overlay); }},
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.fps_overlay); }},
       {L"Diagnostic logging",
        L"Writes detailed logs for bug reports to out\\game\\logs. Lowers performance, so leave it off for "
        L"normal play.",
-       [&s](Graphics& g, const RectF& r) { DrawToggle(g, RectF(r.X + r.Width - 132, r.Y, 132, r.Height), &s.diagnostics); }},
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.diagnostics); }},
       {L"Log files",
        L"Opens the folder with the game's log files. Attach the newest doax2_<number>.log when reporting a "
        L"problem.",
-       [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 17, OpenLogsFolder); }},
+       [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 24, OpenLogsFolder); }},
   };
-  PaintSubPage(g, L"SETTINGS", rows, 128);
+  PaintSubPage(g, L"SETTINGS", rows, RowStyle{132, 30, 21}, 330, 172);
 }
 
 void PaintGraphics(Graphics& g) {
@@ -558,17 +565,15 @@ void PaintGraphics(Graphics& g) {
        }},
       {L"Fullscreen",
        L"Runs the game fullscreen instead of in a window.",
-       [&s](Graphics& g, const RectF& r) { DrawToggle(g, RectF(r.X + r.Width - 132, r.Y, 132, r.Height), &s.fullscreen); }},
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.fullscreen); }},
       {L"Resolution scale",
-       L"Renders the game at a multiple of the console's resolution: sharper image, but each step needs "
-       L"a much faster GPU.",
+       L"Renders at a multiple of the console's resolution: sharper, but needs a much faster GPU.",
        [&s](Graphics& g, const RectF& r) {
          DrawSelector(g, r, s.scale == 1 ? L"1x (native)" : std::to_wstring(s.scale) + L"x",
                       [&s](int direction) { StepOption(s.scale, std::vector<int>{1, 2, 3, 4}, direction); });
        }},
       {L"MSAA mode",
-       L"How the game's own 2x anti-aliasing is reproduced. Native is faster and correct on most GPUs; "
-       L"use Emulated if you see rendering problems.",
+       L"The game's own 2x anti-aliasing. Native is fastest; use Emulated if you see rendering problems.",
        [&s](Graphics& g, const RectF& r) {
          DrawSelector(g, r, s.native_2x_msaa ? L"Native 2x" : L"Emulated 2x",
                       [&s](int) { s.native_2x_msaa = !s.native_2x_msaa; });
@@ -589,11 +594,30 @@ void PaintGraphics(Graphics& g) {
          });
        }},
       {L"Guest V-sync",
-       L"Paces the game from the console's refresh signal, as on the Xbox 360. Required for 60 FPS; "
-       L"without it the game can run too fast.",
-       [&s](Graphics& g, const RectF& r) { DrawToggle(g, RectF(r.X + r.Width - 132, r.Y, 132, r.Height), &s.vsync); }},
+       L"Paces the game from the console's refresh signal. Required for 60 FPS (keeps game speed correct).",
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.vsync); }},
   };
-  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, 88);
+  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{86, 26, 18}, 230, 116);
+}
+
+// The design space (1600 x 900) is scaled uniformly to fit the window and
+// centred; the background covers the whole window (cropped, not stretched).
+struct Layout {
+  float scale = 1;
+  float x = 0;
+  float y = 0;
+};
+Layout g_layout;
+std::unique_ptr<Bitmap> g_background_cache;  // background drawn at the client size
+
+void UpdateLayout(HWND window) {
+  RECT client;
+  GetClientRect(window, &client);
+  const float width = float(client.right - client.left), height = float(client.bottom - client.top);
+  g_layout.scale = std::max(0.05f, std::min(width / kDesignW, height / kDesignH));
+  g_layout.x = (width - kDesignW * g_layout.scale) / 2;
+  g_layout.y = (height - kDesignH * g_layout.scale) / 2;
+  g_background_cache.reset();
 }
 
 void Paint(HWND window) {
@@ -601,20 +625,41 @@ void Paint(HWND window) {
   HDC hdc = BeginPaint(window, &ps);
   RECT client;
   GetClientRect(window, &client);
-  const int width = client.right - client.left, height = client.bottom - client.top;
+  const int width = std::max(1, int(client.right - client.left));
+  const int height = std::max(1, int(client.bottom - client.top));
+  if (!g_background_cache || int(g_background_cache->GetWidth()) != width ||
+      int(g_background_cache->GetHeight()) != height) {
+    g_background_cache = std::make_unique<Bitmap>(width, height, PixelFormat32bppPARGB);
+    Graphics bg(g_background_cache.get());
+    bg.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+    bg.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+    if (g_background) {
+      const float iw = float(g_background->GetWidth()), ih = float(g_background->GetHeight());
+      const float cover = std::max(float(width) / iw, float(height) / ih);
+      const float dw = iw * cover, dh = ih * cover;
+      bg.DrawImage(g_background.get(), RectF((float(width) - dw) / 2, (float(height) - dh) / 2, dw, dh));
+    } else {
+      SolidBrush fill(kDeepBlue);
+      bg.FillRectangle(&fill, 0, 0, width, height);
+    }
+  }
   Bitmap buffer(width, height, PixelFormat32bppPARGB);
   {
     Graphics g(&buffer);
+    g.DrawImage(g_background_cache.get(), 0, 0, width, height);
     g.SetSmoothingMode(SmoothingModeAntiAlias);
     g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    g.ScaleTransform(g_scale, g_scale);
-    if (g_background) {
-      g.DrawImage(g_background.get(), RectF(0, 0, kDesign, kDesign));
-    } else {
-      SolidBrush fill(kDeepBlue);
-      g.FillRectangle(&fill, 0.0f, 0.0f, kDesign, kDesign);
+    if (g_page == Page::kMain) {
+      // Darken the bottom of the art behind the page buttons (full width).
+      const float top = g_layout.y + 700 * g_layout.scale;
+      LinearGradientBrush fade(PointF(0, top - 2), PointF(0, float(height) + 2), Color(0, 8, 36, 84),
+                               Color(170, 8, 36, 84));
+      fade.SetWrapMode(WrapModeTileFlipXY);
+      g.FillRectangle(&fade, 0.0f, top, float(width), float(height) - top);
     }
+    g.TranslateTransform(g_layout.x, g_layout.y);
+    g.ScaleTransform(g_layout.scale, g_layout.scale);
     g_hits.clear();
     switch (g_page) {
       case Page::kMain: PaintMain(g); break;
@@ -628,14 +673,34 @@ void Paint(HWND window) {
 }
 
 int HitTest(LPARAM lparam) {
-  const PointF point(float(short(LOWORD(lparam))) / g_scale, float(short(HIWORD(lparam))) / g_scale);
+  const PointF point((float(short(LOWORD(lparam))) - g_layout.x) / g_layout.scale,
+                     (float(short(HIWORD(lparam))) - g_layout.y) / g_layout.scale);
   for (auto it = g_hits.rbegin(); it != g_hits.rend(); ++it)
     if (it->rect.Contains(point)) return it->id;
   return -1;
 }
 
+// Window size for a given client size.
+SIZE FrameFor(int client_width, int client_height) {
+  RECT rect{0, 0, client_width, client_height};
+  AdjustWindowRectEx(&rect, WS_OVERLAPPEDWINDOW, FALSE, 0);
+  return SIZE{rect.right - rect.left, rect.bottom - rect.top};
+}
+
 LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   switch (message) {
+    case WM_SIZE:
+      UpdateLayout(window);
+      InvalidateRect(window, nullptr, FALSE);
+      return 0;
+    case WM_GETMINMAXINFO: {
+      // Smallest window: half of the design size.
+      const SIZE minimum = FrameFor(int(kDesignW / 2), int(kDesignH / 2));
+      auto* info = reinterpret_cast<MINMAXINFO*>(lparam);
+      info->ptMinTrackSize.x = minimum.cx;
+      info->ptMinTrackSize.y = minimum.cy;
+      return 0;
+    }
     case WM_PAINT:
       Paint(window);
       return 0;
@@ -725,23 +790,21 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   window_class.lpszClassName = class_name;
   RegisterClassExW(&window_class);
 
-  // The window is the size of the background art (1024 x 1024 pixels),
-  // scaled down only when the screen's work area is smaller.
-  const DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  // Opens at 1600 x 900 (client), scaled down only when the screen's work
+  // area is smaller; resizable, the contents scale with the window.
   RECT work{};
   SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-  RECT frame{0, 0, 100, 100};
-  AdjustWindowRectEx(&frame, style, FALSE, 0);
-  const int frame_w = (frame.right - frame.left) - 100, frame_h = (frame.bottom - frame.top) - 100;
-  const float fit = std::min((float(work.right - work.left) - float(frame_w)) / kDesign,
-                             (float(work.bottom - work.top) - float(frame_h)) / kDesign);
-  g_scale = std::min(1.0f, fit);
-  const int client = int(std::lround(kDesign * g_scale));
-  const int window_w = client + frame_w, window_h = client + frame_h;
+  const SIZE frame = FrameFor(100, 100);
+  const int extra_w = frame.cx - 100, extra_h = frame.cy - 100;
+  const float fit = std::min((float(work.right - work.left) - float(extra_w)) / kDesignW,
+                             (float(work.bottom - work.top) - float(extra_h)) / kDesignH);
+  const float initial = std::min(1.0f, fit);
+  const int window_w = int(std::lround(kDesignW * initial)) + extra_w;
+  const int window_h = int(std::lround(kDesignH * initial)) + extra_h;
   const int x = work.left + std::max(0, int(work.right - work.left - window_w) / 2);
   const int y = work.top + std::max(0, int(work.bottom - work.top - window_h) / 2);
-  HWND window = CreateWindowExW(0, class_name, L"DOAX2 Recomp Launcher", style, x, y, window_w, window_h, nullptr,
-                                nullptr, instance, nullptr);
+  HWND window = CreateWindowExW(0, class_name, L"DOAX2 Recomp Launcher", WS_OVERLAPPEDWINDOW, x, y, window_w,
+                                window_h, nullptr, nullptr, instance, nullptr);
   if (!window) return 1;
   ShowWindow(window, show);
   UpdateWindow(window);
@@ -750,6 +813,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     TranslateMessage(&message);
     DispatchMessageW(&message);
   }
+  g_background_cache.reset();
   g_background.reset();
   g_logo.reset();
   GdiplusShutdown(gdiplus_token);
