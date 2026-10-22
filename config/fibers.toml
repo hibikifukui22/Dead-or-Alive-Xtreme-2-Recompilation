@@ -1,0 +1,9 @@
+# Identified from the original XAPI implementations and X_FIBER_CONTEXT layout.
+# Raw guest context-switch assembly cannot preserve native C++ call stacks.
+[rexcrt]
+ConvertThreadToFiber = 0x82782FF0
+ConvertFiberToThread = 0x82783080
+CreateFiber = 0x827830D0
+DeleteFiber = 0x827831B0
+# 0x82783210 is a tail-call thunk to this implementation.
+SwitchToFiber = 0x82785670

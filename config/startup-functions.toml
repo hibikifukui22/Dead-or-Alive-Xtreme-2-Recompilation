@@ -1,0 +1,36 @@
+# Function-pointer table 0x82A80B4C..0x82A81C9C in the decoded DOAX2 image.
+# Missing targets confirmed against the original table; sizes inferred by ReXGlue.
+[functions]
+0x82A1B410 = {} # table slot 0x82a80efc
+0x82A1B430 = {} # table slot 0x82a80f00
+0x82A1B450 = {} # table slot 0x82a80f04
+0x82A1B470 = {} # table slot 0x82a80f08
+0x82A1ECC0 = {} # table slot 0x82a80f78
+0x82A49E58 = {} # table slot 0x82a811e8
+0x82A49E78 = {} # table slot 0x82a811ec
+0x82A49E98 = {} # table slot 0x82a811f0
+0x82A49EB8 = {} # table slot 0x82a811f4
+0x82A4A308 = {} # table slot 0x82a81204
+0x82A4A640 = {} # table slot 0x82a81224
+0x82A54F30 = {} # table slot 0x82a81440
+0x82A54F50 = {} # table slot 0x82a81444
+0x82A55220 = {} # table slot 0x82a81454
+0x82A568C8 = {} # table slot 0x82a814b4
+0x82A568E8 = {} # table slot 0x82a814b8
+0x82A56A78 = {} # table slot 0x82a814c8
+0x82A56A98 = {} # table slot 0x82a814cc
+0x82A59000 = {} # table slot 0x82a81560
+0x82A59020 = {} # table slot 0x82a81564
+0x82A59040 = {} # table slot 0x82a81568
+0x82A59060 = {} # table slot 0x82a8156c
+0x82A59080 = {} # table slot 0x82a81570
+0x82A590A0 = {} # table slot 0x82a81574
+0x82A590C0 = {} # table slot 0x82a81578
+0x82A590E0 = {} # table slot 0x82a8157c
+0x82A59B00 = {} # table slot 0x82a81588
+0x82A5E780 = {} # table slot 0x82a81670
+0x82A5ECD8 = {} # table slot 0x82a81690
+0x82A5F350 = {} # table slot 0x82a816b0
+0x82A5F370 = {} # table slot 0x82a816b4
+0x82A5F390 = {} # table slot 0x82a816b8
+0x82A5F3B0 = {} # table slot 0x82a816bc

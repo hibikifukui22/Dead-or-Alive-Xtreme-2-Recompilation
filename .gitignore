@@ -1,0 +1,46 @@
+# --- Game files and anything derived from them: never commit ---
+/game/*
+!/game/README.md
+/generated/
+/extracted game files here/
+*.iso
+*.xex
+*.xexp
+*.xcp
+*.stfs
+*.sfd
+*.xwb
+*.xgs
+*.afs
+
+# --- Personal data written while playing ---
+/userdata/
+/config/launcher.ini
+logs/
+captures/
+*.log
+*.dmp
+*.rdc
+
+# --- Build output ---
+/out/
+/dist/
+/build/
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.lib
+*.exp
+*.map
+*.obj
+CMakeUserPresets.json
+
+# --- Editors / OS ---
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+.DS_Store
