@@ -13,8 +13,14 @@ try {
     git submodule update --init --recursive
     if ($LASTEXITCODE) { throw 'Submodule update failed.' }
     git -C $sdk config core.longpaths true
-    git -C $sdk apply --reverse --check $patch 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    # Probe: succeeds only when the patch is already applied. Its error output
+    # is expected, so do not let Windows PowerShell turn it into a terminating
+    # error.
+    $ErrorActionPreference = 'Continue'
+    git -C $sdk apply --reverse --check $patch 2>&1 | Out-Null
+    $applied = $LASTEXITCODE -eq 0
+    $ErrorActionPreference = 'Stop'
+    if ($applied) {
         Write-Host 'SDK patch already applied.'
     } else {
         git -C $sdk apply --check $patch
