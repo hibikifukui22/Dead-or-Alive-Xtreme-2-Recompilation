@@ -7888,13 +7888,40 @@ inline uint32_t Native60ScreenUpdateFunction(uint8_t* base) {
 // requests the random title voice. Stop the soundtrack there (the keep-song
 // option ignores the game's own stops on the way), so a new playlist starts
 // when the game is entered again.
+//
+// Skipping the boot movies enters the title twice, 14 updates apart (log
+// test-v1.0.0 002: voice dropped 234 ms after the first). The second entry
+// restarts the title and cut the first voice off mid-line, so a second
+// entry within 2 s of the first, right after a boot movie, is skipped.
 REX_EXTERN(__imp__sub_824C0B78);
 REX_HOOK_RAW(sub_824C0B78) {
+  static int64_t last_entry_ms = -1000000;
+  const int64_t now = Native60NowMs();
+  const bool after_movie = now - native60_movie_event_ms.load() < 10000;
+  if (after_movie && now - last_entry_ms < 2000) {
+    REXLOG_INFO("DOAX2 title screen entered again {} ms after the first (boot movie skip): skipped, lr={:08X}",
+                now - last_entry_ms, uint32_t(ctx.lr));
+    return;
+  }
+  last_entry_ms = now;
   if (rex::audio::GetTitlePlaylistDiagnostics().playing) {
     rex::audio::StopTitlePlaylist();
     REXLOG_INFO("DOAX2 title screen entered: title music stopped");
   }
+  REXLOG_INFO("DOAX2 title screen entered: lr={:08X}", uint32_t(ctx.lr));
   __imp__sub_824C0B78(ctx, base);
+}
+
+// Sound stops by priority (82669180) after the boot movies are logged, in
+// case anything else cuts the title voice.
+REX_EXTERN(__imp__sub_82669180);
+REX_HOOK_RAW(sub_82669180) {
+  if (Native60NowMs() - native60_movie_event_ms.load() < 10000) {
+    static uint32_t lines = 0;
+    if (++lines <= 50)
+      REXLOG_INFO("DOAX2 sound stop (82669180): level={} lr={:08X}", ctx.r3.u32, uint32_t(ctx.lr));
+  }
+  __imp__sub_82669180(ctx, base);
 }
 
 // The game's music fade-out + stop (82745140, 19 callers). Called from the
