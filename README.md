@@ -9,6 +9,12 @@ the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) static
 recompiler. The game's PowerPC code is translated ahead of time into C++ and
 runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 
+> [!WARNING]
+> At the moment, Intel integrated graphics are not supported. Dedicated
+> graphics cards by Intel have not been tested; expect issues on these. The
+> system requirements below are also estimates. Feel free to try running the
+> game on low-end hardware.
+
 > **This repository and its releases do not contain the game.** No game code,
 > data, audio or video is included. You need your own copy of Dead or Alive
 > Xtreme 2 for the Xbox 360. Please do not share or link to game files in
