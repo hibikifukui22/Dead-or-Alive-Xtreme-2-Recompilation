@@ -469,7 +469,60 @@ struct RowStyle {
   float height;
   float title_size;
   float explanation_size;
+  // Explanations in a popup behind a "?" button instead of under the title.
+  bool info_popup = false;
 };
+
+// Explanation popup (graphics settings): title and text of the open popup.
+struct InfoPopup {
+  std::wstring title;
+  std::wstring text;
+};
+std::unique_ptr<InfoPopup> g_info;
+
+// Round "?" button that opens the explanation popup.
+void DrawInfoButton(Graphics& g, const RectF& r, const std::wstring& title, const std::wstring& text) {
+  const int id = AddHit(r, [title, text] { g_info = std::make_unique<InfoPopup>(InfoPopup{title, text}); });
+  const bool hover = id == g_hover;
+  RectF shadow = r;
+  shadow.Offset(0, 3);
+  SolidBrush shadow_brush(Color(70, 0, 20, 60));
+  g.FillEllipse(&shadow_brush, shadow);
+  LinearGradientBrush fill(PointF(0, r.Y), PointF(0, r.Y + r.Height), hover ? Lighter(kAqua, 0.25f) : kAqua,
+                           hover ? Lighter(kOcean, 0.2f) : kOcean);
+  fill.SetWrapMode(WrapModeTileFlipXY);
+  g.FillEllipse(&fill, r);
+  Pen border(WithAlpha(kWhite, BYTE(hover ? 255 : 210)), 2.5f);
+  g.DrawEllipse(&border, r);
+  DrawText(g, L"?", r, r.Height * 0.62f, true, kWhite);
+}
+
+// The open explanation popup: a large card over the dimmed page. Clicking
+// outside the card, CLOSE or Esc closes it; the page underneath stays.
+void DrawInfoPopupOverlay(Graphics& g) {
+  if (!g_info) return;
+  g_hits.clear();
+  const RectF everywhere(-4000, -4000, 9600, 8900);
+  AddHit(everywhere, [] { g_info.reset(); });
+  SolidBrush dim(Color(150, 4, 18, 44));
+  g.FillRectangle(&dim, everywhere);
+  const RectF card(260, 170, 1080, 560);
+  AddHit(card, [] {});
+  GraphicsPath path;
+  RoundedRect(path, card, 36);
+  SolidBrush fill(Color(242, 8, 36, 84));
+  g.FillPath(&fill, &path);
+  Pen border(Color(220, 140, 210, 255), 3.0f);
+  g.DrawPath(&border, &path);
+  DrawText(g, g_info->title, RectF(card.X + 50, card.Y + 34, card.Width - 100, 60), 44, true, kWhite,
+           StringAlignmentNear, StringAlignmentNear);
+  Pen line(Color(110, 160, 210, 255), 2.0f);
+  g.DrawLine(&line, card.X + 50, card.Y + 112, card.X + card.Width - 50, card.Y + 112);
+  DrawText(g, g_info->text, RectF(card.X + 50, card.Y + 136, card.Width - 100, 300), 29, false,
+           Color(255, 225, 238, 255), StringAlignmentNear, StringAlignmentNear, false);
+  DrawButton(g, RectF(card.X + (card.Width - 300) / 2, card.Y + card.Height - 104, 300, 74), L"CLOSE", 30,
+             [] { g_info.reset(); });
+}
 
 void DrawRows(Graphics& g, const std::vector<Row>& rows, float top, const RowStyle& style) {
   for (size_t i = 0; i < rows.size(); ++i) {
@@ -477,6 +530,16 @@ void DrawRows(Graphics& g, const std::vector<Row>& rows, float top, const RowSty
     if (i) {
       Pen line(Color(70, 160, 210, 255), 1.5f);
       g.DrawLine(&line, 186.0f, y, 1414.0f, y);
+    }
+    if (style.info_popup) {
+      DrawText(g, rows[i].title, RectF(192, y, 740, style.height), style.title_size, true, kWhite,
+               StringAlignmentNear, StringAlignmentCenter);
+      const float button = 58;
+      DrawInfoButton(g, RectF(958, y + (style.height - button) / 2, button, button), rows[i].title,
+                     rows[i].explanation);
+      const float control_height = std::min(62.0f, style.height - 22);
+      rows[i].control(g, RectF(1046, y + (style.height - control_height) / 2, 372, control_height));
+      continue;
     }
     const float title_height = style.title_size + 10;
     DrawText(g, rows[i].title, RectF(192, y + 8, 830, title_height), style.title_size, true, kWhite,
@@ -559,7 +622,9 @@ void PaintGraphics(Graphics& g) {
   auto resolution = [&s] { return std::to_wstring(s.width) + L" x " + std::to_wstring(s.height); };
   std::vector<Row> rows = {
       {L"Resolution",
-       L"Size of the game window, or the screen resolution when fullscreen.",
+       L"Sets the size of the game window, or the screen resolution when Fullscreen is on.\n\n"
+       L"The game draws its picture at its own internal resolution and scales it to this size. For a "
+       L"sharper picture, raise Resolution scale as well.",
        [&s, resolution](Graphics& g, const RectF& r) {
          DrawSelector(g, r, resolution(), [&s](int direction) {
            auto current = std::pair{s.width, s.height};
@@ -569,29 +634,39 @@ void PaintGraphics(Graphics& g) {
          });
        }},
       {L"Fullscreen",
-       L"Runs the game fullscreen instead of in a window.",
+       L"Runs the game fullscreen at the chosen resolution instead of in a window.\n\n"
+       L"Turn it off to play in a window you can move next to other programs.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.fullscreen); }},
       {L"Resolution scale",
-       L"Renders at a multiple of the console's resolution: sharper, but needs a much faster GPU.",
+       L"Renders the game at a multiple of the Xbox 360's 1280 x 720 resolution: 2x is 2560 x 1440, "
+       L"3x is 3840 x 2160.\n\n"
+       L"Higher values give a much sharper image but need a much faster GPU. 1x is the original look.",
        [&s](Graphics& g, const RectF& r) {
          DrawSelector(g, r, s.scale == 1 ? L"1x (native)" : std::to_wstring(s.scale) + L"x",
                       [&s](int direction) { StepOption(s.scale, std::vector<int>{1, 2, 3, 4}, direction); });
        }},
       {L"MSAA mode",
-       L"The game's own 2x anti-aliasing. Native is fastest; use Emulated if you see rendering problems.",
+       L"On the Xbox 360 the game smooths edges with 2x multisample anti-aliasing (MSAA).\n\n"
+       L"Native uses your graphics card's own 2x MSAA: fastest, and correct on most GPUs. Emulated "
+       L"uses a slower compatibility path; switch to it only if you see rendering problems.",
        [&s](Graphics& g, const RectF& r) {
          DrawSelector(g, r, s.native_2x_msaa ? L"Native 2x" : L"Emulated 2x",
                       [&s](int) { s.native_2x_msaa = !s.native_2x_msaa; });
        }},
       {L"Post-process anti-aliasing",
-       L"Extra edge smoothing on the final image (FXAA). Slightly softer picture, small performance cost.",
+       L"Adds FXAA, an extra edge-smoothing filter, to the final image. FXAA Extreme smooths more.\n\n"
+       L"Both make the picture slightly softer and cost a little performance. Off keeps the original "
+       L"image.",
        [&s](Graphics& g, const RectF& r) {
          static const wchar_t* kNames[] = {L"Off", L"FXAA", L"FXAA Extreme"};
          DrawSelector(g, r, kNames[s.post_process_aa],
                       [&s](int direction) { StepOption(s.post_process_aa, std::vector<int>{0, 1, 2}, direction); });
        }},
       {L"Anisotropic filtering",
-       L"Keeps textures sharp at steep angles (sand, water, floors). Very small performance cost.",
+       L"Keeps textures sharp when they are seen at a steep angle, such as the sand, the water and "
+       L"floors.\n\n"
+       L"Game default keeps the game's own setting; 16x is the sharpest. The performance cost is very "
+       L"small on modern graphics cards.",
        [&s](Graphics& g, const RectF& r) {
          static const wchar_t* kNames[] = {L"Game default", L"Off", L"1x", L"2x", L"4x", L"8x", L"16x"};
          DrawSelector(g, r, kNames[s.anisotropic + 1], [&s](int direction) {
@@ -599,10 +674,12 @@ void PaintGraphics(Graphics& g) {
          });
        }},
       {L"Guest V-sync",
-       L"Paces the game from the console's refresh signal. Required for 60 FPS.",
+       L"Paces the game from the Xbox 360's refresh signal, the way the console does.\n\n"
+       L"It must stay on for 60 FPS: without it the game can run too fast. This is not your monitor's "
+       L"V-sync.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.vsync); }},
   };
-  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{89, 27, 19});
+  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{89, 34, 0, true});
 }
 
 // The design space (1600 x 900) is scaled uniformly to fit the window and
@@ -671,6 +748,7 @@ void Paint(HWND window) {
       case Page::kSettings: PaintSettings(g); break;
       case Page::kGraphics: PaintGraphics(g); break;
     }
+    DrawInfoPopupOverlay(g);
   }
   Graphics screen(hdc);
   screen.DrawImage(&buffer, 0, 0, width, height);
@@ -737,14 +815,20 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         const Page before = g_page;
         auto action = g_hits[size_t(hit)].action;
         action();
-        if (g_page != before) SetStatus(L"", false);
+        if (g_page != before) {
+          SetStatus(L"", false);
+          g_info.reset();
+        }
         g_hover = -1;
         InvalidateRect(window, nullptr, FALSE);
       }
       return 0;
     }
     case WM_KEYDOWN:
-      if (wparam == VK_ESCAPE && g_page != Page::kMain) {
+      if (wparam == VK_ESCAPE && g_info) {
+        g_info.reset();
+        InvalidateRect(window, nullptr, FALSE);
+      } else if (wparam == VK_ESCAPE && g_page != Page::kMain) {
         g_page = Page::kMain;
         InvalidateRect(window, nullptr, FALSE);
       } else if (wparam == VK_RETURN && g_page == Page::kMain) {
