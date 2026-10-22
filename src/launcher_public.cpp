@@ -38,7 +38,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.0.0";
+constexpr const wchar_t* kVersion = L"v1.1";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;
@@ -60,6 +60,7 @@ struct Settings {
   bool fps_overlay = false;
   bool diagnostics = false;
   bool keep_song = false;
+  int money_multiplier = 1;  // winnings x1 (original), x10, x15, x20, x100
 };
 
 enum class Page { kMain, kSettings, kGraphics };
@@ -138,6 +139,10 @@ Settings LoadSettings() {
   settings.fps_overlay = ReadBool(values, "fps_overlay", settings.fps_overlay);
   settings.diagnostics = ReadBool(values, "diagnostics", settings.diagnostics);
   settings.keep_song = ReadBool(values, "keep_song", settings.keep_song);
+  settings.money_multiplier = ReadInt(values, "money_multiplier", settings.money_multiplier);
+  if (settings.money_multiplier != 10 && settings.money_multiplier != 15 && settings.money_multiplier != 20 &&
+      settings.money_multiplier != 100)
+    settings.money_multiplier = 1;
   return settings;
 }
 
@@ -158,7 +163,8 @@ void SaveSettings() {
          << "post_process_aa=" << s.post_process_aa << '\n'
          << "fps_overlay=" << (s.fps_overlay ? "true" : "false") << '\n'
          << "diagnostics=" << (s.diagnostics ? "true" : "false") << '\n'
-         << "keep_song=" << (s.keep_song ? "true" : "false") << '\n';
+         << "keep_song=" << (s.keep_song ? "true" : "false") << '\n'
+         << "money_multiplier=" << s.money_multiplier << '\n';
 }
 
 void CollectDisplayModes() {
@@ -249,7 +255,8 @@ void Launch(HWND window) {
       // vblanks to the display (even frame delivery).
       + L" --gpu_display_locked_vblank=" + true_false(native60)
       + L" --doax2_native60_counter_scan=" + true_false(s.diagnostics)
-      + L" --xmp_keep_song_across_playlists=" + true_false(s.keep_song);
+      + L" --xmp_keep_song_across_playlists=" + true_false(s.keep_song)
+      + L" --doax2_money_multiplier=" + std::to_wstring(s.money_multiplier);
   if (native60) {
     command += std::wstring(L" --doax2_native60_tick_scale=0.5")
                // Menus at the original speed: transitions and held-direction
@@ -604,6 +611,17 @@ void PaintSettings(Graphics& g) {
        L"Pre-rendered movies and returning to the title screen still stop the music. Off is the game's "
        L"original behaviour.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.keep_song); }},
+      {L"Winnings Multiplier",
+       L"Multiplies the money you win in the casino (blackjack, poker, roulette, slots) and the prize "
+       L"money from minigames.\n\n"
+       L"Only winnings are multiplied: bets, losses and shop prices stay the same. Normal is the "
+       L"game's original amounts.",
+       [&s](Graphics& g, const RectF& r) {
+         DrawSelector(g, r, s.money_multiplier == 1 ? L"Normal" : std::to_wstring(s.money_multiplier) + L"x",
+                      [&s](int direction) {
+                        StepOption(s.money_multiplier, std::vector<int>{1, 10, 15, 20, 100}, direction);
+                      });
+       }},
       {L"Show FPS Overlay",
        L"Shows the current frame rate in the corner of the game window.\n\n"
        L"Useful for checking that the game holds 30 or 60 FPS on your PC.",
@@ -619,7 +637,7 @@ void PaintSettings(Graphics& g) {
        L"is one). Never share game files.",
        [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 24, OpenLogsFolder); }},
   };
-  PaintSubPage(g, L"SETTINGS", rows, RowStyle{120, 36, 0, true});
+  PaintSubPage(g, L"SETTINGS", rows, RowStyle{112, 36, 0, true});
 }
 
 void PaintGraphics(Graphics& g) {

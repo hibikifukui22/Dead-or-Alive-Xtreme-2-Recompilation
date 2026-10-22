@@ -125,6 +125,8 @@ REXCVAR_DEFINE_DOUBLE(doax2_native60_menu_window_scale, 3.0, "DOAX2",
                       "60 FPS: menu window pop in/out durations are multiplied by this (2 = original timing)");
 REXCVAR_DEFINE_DOUBLE(doax2_native60_menu_repeat_scale, 2.0, "DOAX2",
                       "60 FPS: held-direction menu auto-repeat delay/interval are multiplied by this (2 = original speed)");
+REXCVAR_DEFINE_INT32(doax2_money_multiplier, 1, "DOAX2",
+                     "Multiplies casino and minigame winnings (1 = original; 10, 15, 20 or 100)");
 REXCVAR_DEFINE_BOOL(doax2_native60_dev_keys, false, "DOAX2",
                     "Experimental build: F7 smoothing modes without diagnostic logging");
 REXCVAR_DEFINE_BOOL(doax2_native60_counter_scan, false, "DOAX2",
@@ -3661,6 +3663,79 @@ REX_HOOK_RAW(sub_824C4450) {
                 Native60LoadFloat(base, obj + 16), per_update, lr);
 }
 
+// Winnings multiplier (launcher Settings, doax2_money_multiplier). Each girl
+// has her own money: u32 array 83986D9C + girl * 4 (9 girls, capped at
+// 99,999,999 by the game). Bets, losses and purchases are never touched;
+// only increases made by the payout code below are multiplied:
+// - casino payouts (money probe logs 2026-10-22): blackjack 82435360,
+//   slots 82455330, poker / roulette 82447830, 82448760, 82448C60,
+//   82459010, 82459698, 8245D4E0, 8245DE40;
+// - minigame prizes: the Pool Slide results 826A7748 (direct write) and the
+//   game's add-money routine 826CAAA8 (positive amounts only; minigame
+//   prizes, purchases pass a negative amount).
+// The wrappers compare every girl's money before and after the call; nested
+// wrapped calls are applied once, by the outermost.
+namespace doax2_money {
+constexpr uint32_t kMoney = 0x83986D9C;
+constexpr int kGirls = 9;
+constexpr uint32_t kMax = 99999999;
+inline thread_local int depth = 0;
+inline uint32_t Multiplier() {
+  const int32_t k = REXCVAR_GET(doax2_money_multiplier);
+  return k == 10 || k == 15 || k == 20 || k == 100 ? uint32_t(k) : 1u;
+}
+template <typename F>
+inline void Payout(const char* name, uint8_t* base, F&& call) {
+  const uint32_t k = Multiplier();
+  if (k == 1) {
+    call();
+    return;
+  }
+  std::array<uint32_t, kGirls> before{};
+  for (int g = 0; g < kGirls; ++g) before[g] = REX_LOAD_U32(kMoney + g * 4);
+  ++depth;
+  call();
+  --depth;
+  if (depth) return;
+  for (int g = 0; g < kGirls; ++g) {
+    const uint32_t after = REX_LOAD_U32(kMoney + g * 4);
+    if (after <= before[g] || after > kMax) continue;
+    const uint64_t gain = after - before[g];
+    const uint32_t boosted = uint32_t(std::min<uint64_t>(uint64_t(before[g]) + gain * k, kMax));
+    REX_STORE_U32(kMoney + g * 4, boosted);
+    REXLOG_INFO("DOAX2 winnings x{} ({}): girl {} +{} -> +{}", k, name, g, gain, boosted - before[g]);
+  }
+}
+}  // namespace doax2_money
+#define DOAX2_MONEY_PAYOUT(name)                                                  \
+  REX_EXTERN(__imp__##name);                                                     \
+  REX_HOOK_RAW(name) {                                                           \
+    doax2_money::Payout(#name, base, [&] { __imp__##name(ctx, base); });         \
+  }
+DOAX2_MONEY_PAYOUT(sub_82435360)
+DOAX2_MONEY_PAYOUT(sub_82455330)
+DOAX2_MONEY_PAYOUT(sub_82447830)
+DOAX2_MONEY_PAYOUT(sub_82448760)
+DOAX2_MONEY_PAYOUT(sub_82448C60)
+DOAX2_MONEY_PAYOUT(sub_82459010)
+DOAX2_MONEY_PAYOUT(sub_82459698)
+DOAX2_MONEY_PAYOUT(sub_8245D4E0)
+DOAX2_MONEY_PAYOUT(sub_8245DE40)
+DOAX2_MONEY_PAYOUT(sub_826A7748)
+// Add money (r3 = amount): positive amounts outside the wrapped payout code
+// are minigame prizes.
+REX_EXTERN(__imp__sub_826CAAA8);
+REX_HOOK_RAW(sub_826CAAA8) {
+  const uint32_t k = doax2_money::Multiplier();
+  const int32_t amount = ctx.r3.s32;
+  if (k > 1 && amount > 0 && doax2_money::depth == 0) {
+    const int64_t boosted = std::min<int64_t>(int64_t(amount) * k, doax2_money::kMax);
+    ctx.r3.s64 = boosted;
+    REXLOG_INFO("DOAX2 winnings x{} (add money): +{} -> +{}", k, amount, boosted);
+  }
+  __imp__sub_826CAAA8(ctx, base);
+}
+
 void ReportNative60GameStep(uint8_t* base) {
   native60_popup_scan::Update(base);
   Native60SlideSmoothing();
@@ -5274,7 +5349,6 @@ DOAX2_NATIVE60_POS_PROBE(sub_826A4040)
 DOAX2_NATIVE60_POS_PROBE(sub_826A43D8)
 DOAX2_NATIVE60_POS_PROBE(sub_826A4630)
 DOAX2_NATIVE60_POS_PROBE(sub_826A7180)
-DOAX2_NATIVE60_POS_PROBE(sub_826A7748)
 DOAX2_NATIVE60_POS_PROBE(sub_826A9B60)
 DOAX2_NATIVE60_POS_PROBE(sub_826AA728)
 DOAX2_NATIVE60_POS_PROBE(sub_826AC4C0)
@@ -5543,7 +5617,6 @@ DOAX2_NATIVE60_POS_PROBE(sub_82434C38)
 DOAX2_NATIVE60_POS_PROBE(sub_82434EA0)
 DOAX2_NATIVE60_POS_PROBE(sub_82434FF8)
 DOAX2_NATIVE60_POS_PROBE(sub_82435280)
-DOAX2_NATIVE60_POS_PROBE(sub_82435360)
 DOAX2_NATIVE60_POS_PROBE(sub_82435B40)
 DOAX2_NATIVE60_POS_PROBE(sub_82435DB8)
 DOAX2_NATIVE60_POS_PROBE(sub_82435F08)

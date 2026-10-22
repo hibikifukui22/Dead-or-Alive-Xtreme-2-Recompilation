@@ -25,7 +25,7 @@ runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 > Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
 > All trademarks belong to their respective owners.
 
-Current version: **1.0.0** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.1** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Supported game version
 

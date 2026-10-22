@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1
+
+- New launcher option in Settings: **Winnings Multiplier** (Normal, 10x,
+  15x, 20x, 100x). Multiplies casino payouts (blackjack, poker, roulette,
+  slots) and minigame prize money; bets, losses and shop prices are not
+  changed.
+
 ## 1.0.0
 
 First public release.
