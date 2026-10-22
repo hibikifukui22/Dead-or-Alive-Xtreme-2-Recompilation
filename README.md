@@ -8,9 +8,9 @@ runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 > **This repository and its releases do not contain the game.** No game code,
 > data, audio or video is included. You need your own copy of Dead or Alive
 > Xtreme 2 for the Xbox 360. Please do not share or link to game files in
-> issues or pull requests. The launcher shows the game's logo and cover
-> artwork (`resources/launcher/`), which belong to Koei Tecmo and are not
-> covered by this project's license.
+> issues or pull requests. The launcher uses a fan-made project logo; its
+> background shows a Dead or Alive character, who belongs to Koei Tecmo and
+> is not covered by this project's license.
 >
 > Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
 > All trademarks belong to their respective owners.
@@ -63,7 +63,7 @@ cmake --build out\game
 | Path | Contents |
 |---|---|
 | `src/` | Port code: `main.cpp`, the 60 FPS / timing hooks (`doax2_60fps.cpp`), the release launcher (`launcher_public.cpp`) and the developer launcher (`launcher.cpp`) |
-| `resources/launcher/` | Launcher art (background, logo, icon) embedded into the launcher |
+| `resources/launcher/` | Launcher art (background, fan-made logo, icon) embedded into the launcher |
 | `config/`, `doax2_manifest.toml` | ReXGlue code generation manifest (function boundaries, fibers) |
 | `patches/rexglue-sdk/` | This project's changes to ReXGlue SDK v0.10.0 (renderer fixes, title music player) |
 | `sdk/rexglue-sdk/` | ReXGlue SDK v0.10.0 (git submodule) |

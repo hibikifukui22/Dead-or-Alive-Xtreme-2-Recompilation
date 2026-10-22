@@ -22,6 +22,7 @@ Reporting problems: include the newest file(s) from out\game\logs
 (doax2_<number>.log). Never share game files.
 
 Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
-The game's logo and cover artwork shown in the launcher belong to Koei Tecmo.
+The launcher logo is fan-made; the character shown in its background belongs
+to Koei Tecmo.
 License: LICENSE (port code, BSD 3-Clause) and THIRD-PARTY-NOTICES.md.
 Source code: see the project page on GitHub.

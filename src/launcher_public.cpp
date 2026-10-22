@@ -441,10 +441,11 @@ void DrawPanel(Graphics& g, const RectF& r) {
   g.DrawPath(&border, &path);
 }
 
-void DrawLogo(Graphics& g, float width, float y) {
+// The project logo, top left on every page.
+void DrawLogo(Graphics& g, float width) {
   if (!g_logo) return;
   const float height = width * float(g_logo->GetHeight()) / float(g_logo->GetWidth());
-  g.DrawImage(g_logo.get(), RectF((kDesignW - width) / 2, y, width, height));
+  g.DrawImage(g_logo.get(), RectF(22, 14, width, height));
 }
 
 void DrawStatus(Graphics& g, float y) {
@@ -498,28 +499,32 @@ void StepOption(T& value, const std::vector<T>& options, int direction) {
   value = options[size_t(index)];
 }
 
+// Main page: logo top left, PLAY at the bottom middle with the frame rate
+// choice on its left and the settings pages on its right.
 void PaintMain(Graphics& g) {
-  DrawLogo(g, 660, 16);
-  DrawText(g, L"FRAME RATE", RectF(560, 352, 480, 34), 24, true, kWhite);
+  DrawLogo(g, 560);
+  DrawText(g, kVersion, RectF(1380, 14, 204, 38), 21, true, kWhite, StringAlignmentFar);
+  DrawStatus(g, 650);
+  // Left of PLAY: frame rate.
+  DrawText(g, L"FRAME RATE", RectF(60, 728, 470, 34), 24, true, kWhite);
   const auto option = [](bool selected) { return selected ? ButtonStyle::kSelected : ButtonStyle::kUnselected; };
-  DrawButton(g, RectF(544, 392, 246, 76), L"30 FPS", 33, [] {
+  DrawButton(g, RectF(60, 772, 226, 88), L"30 FPS", 33, [] {
     g_settings.frame_rate_mode = kMode30; SaveSettings();
   }, option(g_settings.frame_rate_mode == kMode30));
-  DrawButton(g, RectF(810, 392, 246, 76), L"60 FPS", 33, [] {
+  DrawButton(g, RectF(304, 772, 226, 88), L"60 FPS", 33, [] {
     g_settings.frame_rate_mode = kMode60; SaveSettings();
   }, option(g_settings.frame_rate_mode == kMode60));
-  DrawButton(g, RectF(550, 494, 500, 140), L"PLAY", 66, [] { Launch(nullptr); }, ButtonStyle::kAccent);
-  DrawStatus(g, 656);
-  DrawButton(g, RectF(318, 770, 450, 92), L"SETTINGS", 33, [] { g_page = Page::kSettings; });
-  DrawButton(g, RectF(832, 770, 450, 92), L"GRAPHICS SETTINGS", 33, [] { g_page = Page::kGraphics; });
-  DrawText(g, kVersion, RectF(1380, 858, 204, 38), 21, true, kWhite, StringAlignmentFar);
+  // Bottom middle: PLAY.
+  DrawButton(g, RectF(566, 728, 468, 140), L"PLAY", 66, [] { Launch(nullptr); }, ButtonStyle::kAccent);
+  // Right of PLAY: settings pages.
+  DrawButton(g, RectF(1070, 728, 470, 64), L"SETTINGS", 28, [] { g_page = Page::kSettings; });
+  DrawButton(g, RectF(1070, 804, 470, 64), L"GRAPHICS SETTINGS", 28, [] { g_page = Page::kGraphics; });
 }
 
-void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& rows, const RowStyle& style,
-                  float logo_width, float title_y) {
-  DrawLogo(g, logo_width, 6);
-  DrawText(g, title, RectF(0, title_y, kDesignW, 50), 40, true, kWhite);
-  const float top = title_y + 56;
+void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& rows, const RowStyle& style) {
+  DrawLogo(g, 250);
+  DrawText(g, title, RectF(300, 46, 1000, 56), 42, true, kWhite);
+  const float top = 150;
   DrawPanel(g, RectF(150, top, 1300, style.height * float(rows.size()) + 24));
   DrawRows(g, rows, top + 12, style);
   DrawButton(g, RectF(150, 812, 290, 76), L"‹  BACK", 33, [] { g_page = Page::kMain; });
@@ -546,7 +551,7 @@ void PaintSettings(Graphics& g) {
        L"problem.",
        [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 24, OpenLogsFolder); }},
   };
-  PaintSubPage(g, L"SETTINGS", rows, RowStyle{132, 30, 21}, 330, 172);
+  PaintSubPage(g, L"SETTINGS", rows, RowStyle{148, 31, 22});
 }
 
 void PaintGraphics(Graphics& g) {
@@ -586,7 +591,7 @@ void PaintGraphics(Graphics& g) {
                       [&s](int direction) { StepOption(s.post_process_aa, std::vector<int>{0, 1, 2}, direction); });
        }},
       {L"Anisotropic filtering",
-       L"Keeps textures sharp at steep angles, such as sand, water and floors. Very small performance cost.",
+       L"Keeps textures sharp at steep angles (sand, water, floors). Very small performance cost.",
        [&s](Graphics& g, const RectF& r) {
          static const wchar_t* kNames[] = {L"Game default", L"Off", L"1x", L"2x", L"4x", L"8x", L"16x"};
          DrawSelector(g, r, kNames[s.anisotropic + 1], [&s](int direction) {
@@ -594,10 +599,10 @@ void PaintGraphics(Graphics& g) {
          });
        }},
       {L"Guest V-sync",
-       L"Paces the game from the console's refresh signal. Required for 60 FPS (keeps game speed correct).",
+       L"Paces the game from the console's refresh signal. Required for 60 FPS.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.vsync); }},
   };
-  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{86, 26, 18}, 230, 116);
+  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{89, 27, 19});
 }
 
 // The design space (1600 x 900) is scaled uniformly to fit the window and
@@ -652,7 +657,7 @@ void Paint(HWND window) {
     g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
     if (g_page == Page::kMain) {
       // Darken the bottom of the art behind the page buttons (full width).
-      const float top = g_layout.y + 700 * g_layout.scale;
+      const float top = g_layout.y + 620 * g_layout.scale;
       LinearGradientBrush fade(PointF(0, top - 2), PointF(0, float(height) + 2), Color(0, 8, 36, 84),
                                Color(170, 8, 36, 84));
       fade.SetWrapMode(WrapModeTileFlipXY);

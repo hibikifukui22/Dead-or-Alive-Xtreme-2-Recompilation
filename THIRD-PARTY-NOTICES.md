@@ -11,9 +11,10 @@ attached to every release.
 Dead or Alive Xtreme 2 and all of its code, data, audio, video and trademarks
 belong to their respective owners (Koei Tecmo / Team NINJA). No game code,
 data, audio or video is in this repository or in its releases; you must
-provide your own copy of the game. The launcher displays the game's logo and
-cover artwork (`resources/launcher/`), which belong to Koei Tecmo and are not
-licensed under this project's license. This project is not affiliated with or
+provide your own copy of the game. The launcher uses a fan-made project logo;
+its background (`resources/launcher/background.jpg`) shows a Dead or Alive
+character, who belongs to Koei Tecmo and is not licensed under this project's
+license. This project is not affiliated with or
 endorsed by Koei Tecmo or Microsoft.
 
 ## ReXGlue SDK
