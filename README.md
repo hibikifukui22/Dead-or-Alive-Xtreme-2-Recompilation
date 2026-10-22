@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="resources/launcher/logo.png" alt="DOAX2 Recomp" width="560">
+</p>
+
 # DOAX2 Recomp
 
 A native Windows PC port of **Dead or Alive Xtreme 2** (Xbox 360), built with
@@ -41,8 +45,39 @@ Title updates are not supported.
    **Settings** and **Graphics Settings** hold the other options, each with
    an explanation.
 
-Requirements: Windows 10/11 x64 and a Direct3D 12 GPU. Saves are written to
-the `userdata` folder next to the launcher.
+Saves are written to the `userdata` folder next to the launcher.
+
+## System requirements
+
+The game is rendered on the GPU through Direct3D 12, emulating the Xbox 360's
+graphics chip, so the graphics card matters most. Targets are 60 FPS with
+Resolution Scale at 1x.
+
+| | 1080p: Minimum | 1080p: Recommended | 1440p: Minimum | 1440p: Recommended |
+|---|---|---|---|---|
+| **Graphics card** | NVIDIA RTX 2060 Super / RTX 3060<br>AMD RX 6600 XT | NVIDIA RTX 3060 Ti / RTX 4060 Ti<br>AMD RX 6700 XT | NVIDIA RTX 3060 Ti / RTX 4060 Ti<br>AMD RX 6700 XT | NVIDIA RTX 4070 / RTX 3080<br>AMD RX 6800 / RX 7800 XT |
+| **Processor** | Intel Core i5-10400<br>AMD Ryzen 5 3600 | Intel Core i5-12400<br>AMD Ryzen 5 5600X | Intel Core i5-12400<br>AMD Ryzen 5 5600X | Intel Core i5-12600K<br>AMD Ryzen 7 5800X3D |
+| **Memory** | 8 GB | 16 GB | 16 GB | 16 GB |
+
+All configurations: Windows 10 or 11 (64-bit), a DirectX 12 graphics card
+with up-to-date drivers, and about 7 GB of free space (the extracted game is
+about 6.2 GB, the release about 55 MB).
+
+For **4K at 60 FPS**, plan on an NVIDIA RTX 4080 or AMD RX 7900 XTX class card.
+
+### Tested results
+
+| System | 1080p | 1440p | 4K |
+|---|---|---|---|
+| RTX 2060 Super + Core i5-12600K | 60 FPS | ~45 FPS | |
+| RX 6950 XT | | 60 FPS | ~50 FPS |
+| RTX 3090 | | 60 FPS | ~50 FPS |
+
+The other cards in the table are placed by their typical performance relative
+to these tested cards: about 1.35x an RTX 2060 Super for 1440p at 60 FPS, and
+about 1.2x an RX 6950 XT / RTX 3090 for 4K. The processor and memory
+recommendations are estimates. Raising Resolution Scale above 1x needs a much
+faster graphics card. Results from other hardware are welcome in the issues.
 
 ## Building from source
 
