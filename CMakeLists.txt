@@ -53,6 +53,20 @@ if(WIN32)
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tester")
 endif()
 
+# Public launcher (GitHub releases): custom-drawn window with the background
+# and logo art embedded as resources; 30 / 60 FPS, Settings and Graphics
+# Settings pages. Packaged by scripts/build-release.ps1.
+if(WIN32)
+    enable_language(RC)
+    set(LAUNCHER_RESOURCE_DIR "${CMAKE_SOURCE_DIR}/resources/launcher")
+    configure_file(resources/launcher/launcher.rc.in "${CMAKE_BINARY_DIR}/launcher_public.rc" @ONLY)
+    add_executable(doax2_public_launcher WIN32 src/launcher_public.cpp "${CMAKE_BINARY_DIR}/launcher_public.rc")
+    target_link_libraries(doax2_public_launcher PRIVATE gdiplus shlwapi)
+    set_target_properties(doax2_public_launcher PROPERTIES
+        OUTPUT_NAME "DOAX2 Recomp Launcher"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/public")
+endif()
+
 # Developer utility: extracts the raw file from an Xbox 360 STFS save package.
 # It is deliberately separate from the game executable and is not installed.
 add_executable(stfs_extract tools/stfs_extract.cpp)

@@ -17,5 +17,7 @@ First public release.
   scenes and minigames" (movies and the title screen still stop the music).
 - Boot movies can be skipped with A / Start / Enter / Space; the title voice
   plays once when they are skipped.
+- Launcher: 30 FPS or 60 FPS on the main page; Settings and Graphics
+  Settings pages with an explanation for every option.
 - Renderer fixes and performance work (A8 shadow resolve, EDRAM wrap, exact
   screen-space draw extents, batched uploads).

@@ -1,0 +1,6 @@
+// Public launcher resources; CMake fills in the image paths.
+#include "@LAUNCHER_RESOURCE_DIR@/launcher_resources.h"
+
+IDI_LAUNCHER_ICON ICON "@LAUNCHER_RESOURCE_DIR@/launcher.ico"
+IDR_LAUNCHER_BACKGROUND RCDATA "@LAUNCHER_RESOURCE_DIR@/main_background.jpg"
+IDR_LAUNCHER_LOGO RCDATA "@LAUNCHER_RESOURCE_DIR@/doax2logo.png"

@@ -6,9 +6,11 @@ recompiler. The game's PowerPC code is translated ahead of time into C++ and
 runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 
 > **This repository and its releases do not contain the game.** No game code,
-> data, audio, video or other assets are included. You need your own copy of
-> Dead or Alive Xtreme 2 for the Xbox 360. Please do not share or link to game
-> files in issues or pull requests.
+> data, audio or video is included. You need your own copy of Dead or Alive
+> Xtreme 2 for the Xbox 360. Please do not share or link to game files in
+> issues or pull requests. The launcher shows the game's logo and cover
+> artwork (`resources/launcher/`), which belong to Koei Tecmo and are not
+> covered by this project's license.
 >
 > Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
 > All trademarks belong to their respective owners.
@@ -35,8 +37,9 @@ Title updates are not supported.
 2. Extract your Xbox 360 disc (for example with `extract-xiso`) into the
    folder `extracted game files here`, so that `default.xex` sits directly
    inside it.
-3. Run the launcher, choose your resolution and options, and press
-   **Launch DOAX2**.
+3. Run `DOAX2 Recomp Launcher.exe`, choose 30 or 60 FPS and press **PLAY**.
+   **Settings** and **Graphics Settings** hold the other options, each with
+   an explanation.
 
 Requirements: Windows 10/11 x64 and a Direct3D 12 GPU. Saves are written to
 the `userdata` folder next to the launcher.
@@ -59,7 +62,8 @@ cmake --build out\game
 
 | Path | Contents |
 |---|---|
-| `src/` | Port code: `main.cpp`, the 60 FPS / timing hooks (`doax2_60fps.cpp`), the launcher (`launcher.cpp`) |
+| `src/` | Port code: `main.cpp`, the 60 FPS / timing hooks (`doax2_60fps.cpp`), the release launcher (`launcher_public.cpp`) and the developer launcher (`launcher.cpp`) |
+| `resources/launcher/` | Launcher art (background, logo, icon) embedded into the launcher |
 | `config/`, `doax2_manifest.toml` | ReXGlue code generation manifest (function boundaries, fibers) |
 | `patches/rexglue-sdk/` | This project's changes to ReXGlue SDK v0.10.0 (renderer fixes, title music player) |
 | `sdk/rexglue-sdk/` | ReXGlue SDK v0.10.0 (git submodule) |

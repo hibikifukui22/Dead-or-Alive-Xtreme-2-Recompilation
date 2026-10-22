@@ -61,7 +61,7 @@ try {
     cmake --preset win-amd64-release -B $gameBuild "-DCMAKE_PREFIX_PATH=$sdkInstall" `
         "-DCMAKE_C_FLAGS=$prefixMap" "-DCMAKE_CXX_FLAGS=$prefixMap" "-DCMAKE_EXE_LINKER_FLAGS=$linkFlags"
     if ($LASTEXITCODE) { throw 'Game configure failed.' }
-    cmake --build $gameBuild --target doax2 doax2_tester_launcher --parallel $Jobs
+    cmake --build $gameBuild --target doax2 doax2_public_launcher --parallel $Jobs
     if ($LASTEXITCODE) { throw 'Game build failed.' }
 } finally { Pop-Location }
 
@@ -70,11 +70,11 @@ $package = Join-Path $dist $name
 if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }
 $gameDir = Join-Path $package 'out/game'
 New-Item -ItemType Directory -Force $gameDir, (Join-Path $package 'extracted game files here') | Out-Null
-# The launcher starts out/game/doax2.60fps-stable.exe and reads the game
+# The launcher starts out/game/doax2.exe (30 and 60 FPS) and reads the game
 # from "extracted game files here".
-Copy-Item (Join-Path $gameBuild 'doax2.exe') (Join-Path $gameDir 'doax2.60fps-stable.exe')
+Copy-Item (Join-Path $gameBuild 'doax2.exe') $gameDir
 Copy-Item (Join-Path $gameBuild 'rexruntime.dll'), (Join-Path $gameBuild 'rexgpu-xenos.dll') $gameDir
-Copy-Item (Join-Path $gameBuild 'tester/DOAX2 60FPS Test Launcher.exe') (Join-Path $package 'DOAX2 Recomp Launcher.exe')
+Copy-Item (Join-Path $gameBuild 'public/DOAX2 Recomp Launcher.exe') $package
 # Visual C++ runtime next to the game (redistributable).
 $crt = Get-ChildItem (Join-Path $vsPath 'VC/Redist/MSVC') -Directory |
     Sort-Object Name -Descending | ForEach-Object { Get-ChildItem (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue } |
