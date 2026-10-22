@@ -6,11 +6,11 @@ Dead or Alive Xtreme 2 for the Xbox 360 (retail disc, title ID 544307D2).
 1. Extract your Xbox 360 disc (for example with extract-xiso) into the folder
    "extracted game files here", so that default.xex sits directly inside it.
 2. Run "DOAX2 Recomp Launcher.exe", choose 30 FPS or 60 FPS and press PLAY.
-   - SETTINGS: keep the song playing across scenes, FPS overlay, diagnostic
+   - SETTINGS: Continuous Music Playback, FPS overlay, diagnostic
      logging and the logs folder.
    - GRAPHICS SETTINGS: resolution, fullscreen, resolution scale,
-     anti-aliasing, texture filtering and Guest V-sync (needed for 60 FPS).
-   Each option is explained in the launcher; changes are saved
+     anti-aliasing, texture filtering and Guest V-Sync (needed for 60 FPS).
+   Press ? next to an option for an explanation; changes are saved
    automatically in config\launcher.ini.
 3. Saves are stored in the "userdata" folder next to the launcher.
 

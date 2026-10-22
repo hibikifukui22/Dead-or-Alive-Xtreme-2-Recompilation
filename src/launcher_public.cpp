@@ -199,7 +199,7 @@ void Launch(HWND window) {
   const Settings& s = g_settings;
   const bool native60 = s.frame_rate_mode == kMode60;
   if (native60 && !s.vsync) {
-    SetStatus(L"60 FPS needs Guest V-sync: turn it on in Graphics Settings.", true);
+    SetStatus(L"60 FPS needs Guest V-Sync: turn it on in Graphics Settings.", true);
     return;
   }
   const auto game_exe = g_root / "out" / "game" / "doax2.exe";
@@ -598,23 +598,28 @@ void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& row
 void PaintSettings(Graphics& g) {
   Settings& s = g_settings;
   std::vector<Row> rows = {
-      {L"Keep song playing across scenes",
-       L"The current song plays to its end instead of restarting on every scene change, minigame or event. "
-       L"Pre-rendered movies and the title screen still stop the music.",
+      {L"Continuous Music Playback",
+       L"The current song keeps playing to its end instead of restarting whenever you change scenes, start "
+       L"a minigame or an event begins. When it ends, the soundtrack carries on with the next song.\n\n"
+       L"Pre-rendered movies and returning to the title screen still stop the music. Off is the game's "
+       L"original behaviour.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.keep_song); }},
-      {L"Show FPS overlay",
-       L"Shows the current frame rate in the corner of the game window.",
+      {L"Show FPS Overlay",
+       L"Shows the current frame rate in the corner of the game window.\n\n"
+       L"Useful for checking that the game holds 30 or 60 FPS on your PC.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.fps_overlay); }},
-      {L"Diagnostic logging",
-       L"Writes detailed logs for bug reports to out\\game\\logs. Lowers performance, so leave it off for "
-       L"normal play.",
+      {L"Diagnostic Logging",
+       L"Writes detailed logs for bug reports to the out\\game\\logs folder.\n\n"
+       L"It lowers performance, so leave it off for normal play and turn it on only when you are "
+       L"reporting a problem or are asked for logs.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.diagnostics); }},
-      {L"Log files",
-       L"Opens the folder with the game's log files. Attach the newest doax2_<number>.log when reporting a "
-       L"problem.",
+      {L"Log Files",
+       L"Opens the folder with the game's log files.\n\n"
+       L"When reporting a problem, attach the newest doax2_<number>.log (and doax2_<number>.1.log if there "
+       L"is one). Never share game files.",
        [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 24, OpenLogsFolder); }},
   };
-  PaintSubPage(g, L"SETTINGS", rows, RowStyle{148, 31, 22});
+  PaintSubPage(g, L"SETTINGS", rows, RowStyle{120, 36, 0, true});
 }
 
 void PaintGraphics(Graphics& g) {
@@ -624,7 +629,7 @@ void PaintGraphics(Graphics& g) {
       {L"Resolution",
        L"Sets the size of the game window, or the screen resolution when Fullscreen is on.\n\n"
        L"The game draws its picture at its own internal resolution and scales it to this size. For a "
-       L"sharper picture, raise Resolution scale as well.",
+       L"sharper picture, raise Resolution Scale as well.",
        [&s, resolution](Graphics& g, const RectF& r) {
          DrawSelector(g, r, resolution(), [&s](int direction) {
            auto current = std::pair{s.width, s.height};
@@ -637,7 +642,7 @@ void PaintGraphics(Graphics& g) {
        L"Runs the game fullscreen at the chosen resolution instead of in a window.\n\n"
        L"Turn it off to play in a window you can move next to other programs.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.fullscreen); }},
-      {L"Resolution scale",
+      {L"Resolution Scale",
        L"Renders the game at a multiple of the Xbox 360's 1280 x 720 resolution: 2x is 2560 x 1440, "
        L"3x is 3840 x 2160.\n\n"
        L"Higher values give a much sharper image but need a much faster GPU. 1x is the original look.",
@@ -645,7 +650,7 @@ void PaintGraphics(Graphics& g) {
          DrawSelector(g, r, s.scale == 1 ? L"1x (native)" : std::to_wstring(s.scale) + L"x",
                       [&s](int direction) { StepOption(s.scale, std::vector<int>{1, 2, 3, 4}, direction); });
        }},
-      {L"MSAA mode",
+      {L"MSAA Mode",
        L"On the Xbox 360 the game smooths edges with 2x multisample anti-aliasing (MSAA).\n\n"
        L"Native uses your graphics card's own 2x MSAA: fastest, and correct on most GPUs. Emulated "
        L"uses a slower compatibility path; switch to it only if you see rendering problems.",
@@ -653,7 +658,7 @@ void PaintGraphics(Graphics& g) {
          DrawSelector(g, r, s.native_2x_msaa ? L"Native 2x" : L"Emulated 2x",
                       [&s](int) { s.native_2x_msaa = !s.native_2x_msaa; });
        }},
-      {L"Post-process anti-aliasing",
+      {L"Post-Process Anti-Aliasing",
        L"Adds FXAA, an extra edge-smoothing filter, to the final image. FXAA Extreme smooths more.\n\n"
        L"Both make the picture slightly softer and cost a little performance. Off keeps the original "
        L"image.",
@@ -662,7 +667,7 @@ void PaintGraphics(Graphics& g) {
          DrawSelector(g, r, kNames[s.post_process_aa],
                       [&s](int direction) { StepOption(s.post_process_aa, std::vector<int>{0, 1, 2}, direction); });
        }},
-      {L"Anisotropic filtering",
+      {L"Anisotropic Filtering",
        L"Keeps textures sharp when they are seen at a steep angle, such as the sand, the water and "
        L"floors.\n\n"
        L"Game default keeps the game's own setting; 16x is the sharpest. The performance cost is very "
@@ -673,7 +678,7 @@ void PaintGraphics(Graphics& g) {
            StepOption(s.anisotropic, std::vector<int>{-1, 0, 1, 2, 3, 4, 5}, direction);
          });
        }},
-      {L"Guest V-sync",
+      {L"Guest V-Sync",
        L"Paces the game from the Xbox 360's refresh signal, the way the console does.\n\n"
        L"It must stay on for 60 FPS: without it the game can run too fast. This is not your monitor's "
        L"V-sync.",

@@ -13,11 +13,12 @@ First public release.
 - Menus at the original speed in 60 FPS mode: window pop in/out, held
   direction scrolling, option/image bounce.
 - Licensed soundtrack playback with the in-game music volume; song title and
-  artist shown once per song change; optional "Keep song playing across
-  scenes and minigames" (movies and the title screen still stop the music).
+  artist shown once per song change; optional Continuous Music Playback
+  (the song plays on across scenes and minigames; movies and the title
+  screen still stop the music).
 - Boot movies can be skipped with A / Start / Enter / Space; the title voice
   plays once when they are skipped.
 - Launcher: 30 FPS or 60 FPS on the main page; Settings and Graphics
-  Settings pages with an explanation for every option.
+  Settings pages with a ? explanation popup for every option.
 - Renderer fixes and performance work (A8 shadow resolve, EDRAM wrap, exact
   screen-space draw extents, batched uploads).
