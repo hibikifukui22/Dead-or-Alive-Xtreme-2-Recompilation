@@ -30,6 +30,7 @@ using std::min;
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../resources/launcher/launcher_resources.h"
@@ -38,7 +39,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.1";
+constexpr const wchar_t* kVersion = L"v1.1.1";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;
@@ -46,6 +47,10 @@ constexpr float kDesignH = 900.0f;
 // Frame rate modes (values kept compatible with earlier launcher.ini files).
 constexpr int kMode30 = 30;
 constexpr int kMode60 = 65;
+
+// Posted to the window when a game started from it exits.
+constexpr UINT kGameExited = WM_APP + 1;
+constexpr const wchar_t* kRunningStatus = L"DOAX2 is running. Logs are saved in out\\game\\logs.";
 
 struct Settings {
   int width = 1280;
@@ -73,6 +78,7 @@ struct HitArea {
 };
 
 std::filesystem::path g_root;
+HWND g_window = nullptr;  // the launcher window
 Settings g_settings;
 Page g_page = Page::kMain;
 std::vector<std::pair<int, int>> g_modes;
@@ -276,8 +282,13 @@ void Launch(HWND window) {
     return;
   }
   CloseHandle(process.hThread);
-  CloseHandle(process.hProcess);
-  SetStatus(L"DOAX2 is running. Logs are saved in out\\game\\logs.", false);
+  SetStatus(kRunningStatus, false);
+  // Clear the running message when the game closes.
+  std::thread([game = process.hProcess] {
+    WaitForSingleObject(game, INFINITE);
+    CloseHandle(game);
+    PostMessageW(g_window, kGameExited, 0, 0);
+  }).detach();
 }
 
 void OpenLogsFolder() {
@@ -859,6 +870,13 @@ LRESULT CALLBACK WindowProcedure(HWND window, UINT message, WPARAM wparam, LPARA
         InvalidateRect(window, nullptr, FALSE);
       }
       return 0;
+    case kGameExited:
+      // Only the running message; an error shown since stays.
+      if (g_status == kRunningStatus) {
+        SetStatus(L"", false);
+        InvalidateRect(window, nullptr, FALSE);
+      }
+      return 0;
     case WM_DESTROY:
       SaveSettings();
       PostQuitMessage(0);
@@ -918,6 +936,7 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   HWND window = CreateWindowExW(0, class_name, L"DOAX2 Recomp Launcher", WS_OVERLAPPEDWINDOW, x, y, window_w,
                                 window_h, nullptr, nullptr, instance, nullptr);
   if (!window) return 1;
+  g_window = window;
   ShowWindow(window, show);
   UpdateWindow(window);
   MSG message;

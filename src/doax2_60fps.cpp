@@ -3667,9 +3667,9 @@ REX_HOOK_RAW(sub_824C4450) {
 // has her own money: u32 array 83986D9C + girl * 4 (9 girls, capped at
 // 99,999,999 by the game). Bets, losses and purchases are never touched;
 // only increases made by the payout code below are multiplied:
-// - casino payouts (money probe logs 2026-10-22): blackjack 82435360,
-//   slots 82455330, poker / roulette 82447830, 82448760, 82448C60,
-//   82459010, 82459698, 8245D4E0, 8245DE40;
+// - casino payouts (money probe and write watch logs 2026-10-22): blackjack
+//   82435360 / 82433740 / 82433CD0, slots 82455330, poker 82459010,
+//   82459698, 8245D4E0, 8245DE40, roulette 8244B348 (its own chips, below);
 // - minigame prizes: the Pool Slide results 826A7748 (direct write) and the
 //   game's add-money routine 826CAAA8 (positive amounts only; minigame
 //   prizes, purchases pass a negative amount).
@@ -3686,6 +3686,12 @@ inline uint32_t Multiplier() {
 }
 template <typename F>
 inline void Payout(const char* name, uint8_t* base, F&& call) {
+  Payout(name, base, std::forward<F>(call), [](uint32_t) {});
+}
+// on_extra(extra) runs for each boosted payout so the minigame's own copies
+// of the balance (table chips, win popup) can show the same amount.
+template <typename F, typename G>
+inline void Payout(const char* name, uint8_t* base, F&& call, G&& on_extra) {
   const uint32_t k = Multiplier();
   if (k == 1) {
     call();
@@ -3703,25 +3709,140 @@ inline void Payout(const char* name, uint8_t* base, F&& call) {
     const uint64_t gain = after - before[g];
     const uint32_t boosted = uint32_t(std::min<uint64_t>(uint64_t(before[g]) + gain * k, kMax));
     REX_STORE_U32(kMoney + g * 4, boosted);
+    on_extra(boosted - after);
     REXLOG_INFO("DOAX2 winnings x{} ({}): girl {} +{} -> +{}", k, name, g, gain, boosted - before[g]);
   }
 }
+// Blackjack and poker share the on-screen counters at 83A704F8: bet / win
+// (+4 target, +8 shown, +12 count-up step) and balance (+16 target, +20
+// shown, +24 step). Blackjack also keeps its own chip count per seat
+// (table + seat * 1040 + 1032, the player is seat 0). Both are updated next
+// to the money, so they get the same extra.
+constexpr uint32_t kCasinoCounter = 0x83A704F8;
+inline uint32_t AddCapped(uint32_t value, uint32_t extra) {
+  return uint32_t(std::min<uint64_t>(uint64_t(value) + extra, kMax));
+}
+// Moves a counter's target (offset 4 = win, 16 = balance) by delta and
+// restarts its count-up from the value shown.
+inline void AdjustCounter(uint8_t* base, uint32_t offset, int64_t delta) {
+  const int64_t target =
+      std::clamp<int64_t>(int64_t(int32_t(REX_LOAD_U32(kCasinoCounter + offset))) + delta, 0, kMax);
+  REX_STORE_U32(kCasinoCounter + offset, uint32_t(target));
+  const int32_t shown = int32_t(REX_LOAD_U32(kCasinoCounter + offset + 4));
+  REX_STORE_U32(kCasinoCounter + offset + 8, uint32_t((int32_t(target) - shown) / 5));
+}
+template <typename F>
+inline void BlackjackPayout(const char* name, uint8_t* base, uint32_t table, F&& call) {
+  Payout(name, base, std::forward<F>(call), [base, table](uint32_t extra) {
+    REX_STORE_U32(table + 1032, AddCapped(REX_LOAD_U32(table + 1032), extra));
+    AdjustCounter(base, 4, extra);
+  });
+}
+// Poker: the hand result 8245DE40 adds bet x pot to the money and sets the
+// win counter to it; the next update (8245E628) moves bet x pot from the win
+// counter to the balance counter. The extra is shown with the win and moved
+// with it (pending_extra).
+inline uint32_t poker_pending_extra = 0;
+template <typename F>
+inline void PokerPayout(const char* name, uint8_t* base, F&& call) {
+  Payout(name, base, std::forward<F>(call), [base](uint32_t extra) {
+    AdjustCounter(base, 4, extra);
+    poker_pending_extra += extra;
+  });
+}
+// Roulette plays with its own chip balance (82E22710: +0 chips, +4 payout of
+// the spin, +12 chip value), copied from the money on entry and back to it on
+// leaving. The spin payout is summed by 8244B348 (odds x chips x chip value
+// per winning bet) and then shown and added to the chips, so it is
+// multiplied there.
+constexpr uint32_t kRouletteChips = 0x82E22710;
 }  // namespace doax2_money
 #define DOAX2_MONEY_PAYOUT(name)                                                  \
   REX_EXTERN(__imp__##name);                                                     \
   REX_HOOK_RAW(name) {                                                           \
     doax2_money::Payout(#name, base, [&] { __imp__##name(ctx, base); });         \
   }
-DOAX2_MONEY_PAYOUT(sub_82435360)
+// Blackjack: hand results 82435360, and the table update 82433740 / 82433CD0
+// (double down, split and insurance payouts; 82433740 also calls 82435360).
+#define DOAX2_BLACKJACK_PAYOUT(name)                                              \
+  REX_EXTERN(__imp__##name);                                                     \
+  REX_HOOK_RAW(name) {                                                           \
+    doax2_money::BlackjackPayout(#name, base, ctx.r3.u32,                        \
+                                 [&] { __imp__##name(ctx, base); });             \
+  }
+DOAX2_BLACKJACK_PAYOUT(sub_82435360)
+DOAX2_BLACKJACK_PAYOUT(sub_82433740)
+DOAX2_BLACKJACK_PAYOUT(sub_82433CD0)
 DOAX2_MONEY_PAYOUT(sub_82455330)
-DOAX2_MONEY_PAYOUT(sub_82447830)
-DOAX2_MONEY_PAYOUT(sub_82448760)
-DOAX2_MONEY_PAYOUT(sub_82448C60)
-DOAX2_MONEY_PAYOUT(sub_82459010)
-DOAX2_MONEY_PAYOUT(sub_82459698)
-DOAX2_MONEY_PAYOUT(sub_8245D4E0)
-DOAX2_MONEY_PAYOUT(sub_8245DE40)
+#define DOAX2_POKER_PAYOUT(name)                                                  \
+  REX_EXTERN(__imp__##name);                                                     \
+  REX_HOOK_RAW(name) {                                                           \
+    doax2_money::PokerPayout(#name, base, [&] { __imp__##name(ctx, base); });    \
+  }
+DOAX2_POKER_PAYOUT(sub_82459010)
+DOAX2_POKER_PAYOUT(sub_82459698)
+DOAX2_POKER_PAYOUT(sub_8245D4E0)
+DOAX2_POKER_PAYOUT(sub_8245DE40)
+// Poker win collection: when the game moved the win counter into the balance
+// counter, move the extra along.
+REX_EXTERN(__imp__sub_8245E628);
+REX_HOOK_RAW(sub_8245E628) {
+  const uint32_t win_before = REX_LOAD_U32(doax2_money::kCasinoCounter + 4);
+  __imp__sub_8245E628(ctx, base);
+  uint32_t& pending = doax2_money::poker_pending_extra;
+  if (!pending || REX_LOAD_U32(doax2_money::kCasinoCounter + 4) >= win_before) return;
+  const uint32_t moved = std::min(pending, REX_LOAD_U32(doax2_money::kCasinoCounter + 4));
+  doax2_money::AdjustCounter(base, 4, -int64_t(moved));
+  doax2_money::AdjustCounter(base, 16, moved);
+  pending = 0;
+}
+// Roulette spin payout (r3 = table; adds to the payout at 82E22714).
+REX_EXTERN(__imp__sub_8244B348);
+REX_HOOK_RAW(sub_8244B348) {
+  const uint32_t k = doax2_money::Multiplier();
+  const uint32_t before = REX_LOAD_U32(doax2_money::kRouletteChips + 4);
+  __imp__sub_8244B348(ctx, base);
+  const uint32_t after = REX_LOAD_U32(doax2_money::kRouletteChips + 4);
+  if (k == 1 || after <= before || after > doax2_money::kMax) return;
+  const uint64_t gain = after - before;
+  const uint32_t boosted = uint32_t(std::min<uint64_t>(before + gain * k, doax2_money::kMax));
+  REX_STORE_U32(doax2_money::kRouletteChips + 4, boosted);
+  REXLOG_INFO("DOAX2 winnings x{} (roulette): +{} -> +{}", k, gain, boosted - before);
+}
 DOAX2_MONEY_PAYOUT(sub_826A7748)
+// Minigame payout screen (824F19F0: r3 = minigame, r4 = starting money,
+// r5 = prize and bonus amounts, r7 = how many, up to 4). Every minigame
+// shows its prize and bonuses through it (82689298, 826412A8, 82699980,
+// 826A0608, 826A7748, 8269B5B8, 826AB328) and pays their sum with the
+// add-money routine or the Pool Slide write, which are multiplied above, so
+// each amount is multiplied here for the screen to match.
+REX_EXTERN(__imp__sub_824F19F0);
+REX_HOOK_RAW(sub_824F19F0) {
+  const uint32_t k = doax2_money::Multiplier();
+  if (k > 1) {
+    const int32_t count = std::min<int32_t>(ctx.r7.s32, 4);
+    for (int32_t i = 0; i < count; ++i) {
+      const uint32_t address = ctx.r5.u32 + uint32_t(i) * 4;
+      const int32_t amount = int32_t(REX_LOAD_U32(address));
+      if (amount > 0)
+        REX_STORE_U32(address, uint32_t(std::min<int64_t>(int64_t(amount) * k, doax2_money::kMax)));
+    }
+    REXLOG_INFO("DOAX2 winnings x{} (payout screen, minigame {}): {} amounts", k, ctx.r3.s32, count);
+  }
+  __imp__sub_824F19F0(ctx, base);
+}
+// Minigame 2's payout (82699980, from 82696FE0) starts the screen from the
+// prizes won so far (83952DE0 + 18652, raw amounts, added to after each
+// payout) instead of the money; show that multiplied too.
+REX_EXTERN(__imp__sub_82699980);
+REX_HOOK_RAW(sub_82699980) {
+  constexpr uint32_t kSoFar = 0x83952DE0 + 18652;
+  const uint32_t k = doax2_money::Multiplier();
+  const uint32_t so_far = REX_LOAD_U32(kSoFar);
+  if (k > 1) REX_STORE_U32(kSoFar, uint32_t(std::min<uint64_t>(uint64_t(so_far) * k, doax2_money::kMax)));
+  __imp__sub_82699980(ctx, base);
+  REX_STORE_U32(kSoFar, so_far);
+}
 // Add money (r3 = amount): positive amounts outside the wrapped payout code
 // are minigame prizes.
 REX_EXTERN(__imp__sub_826CAAA8);
@@ -5608,9 +5729,7 @@ DOAX2_NATIVE60_POS_PROBE(sub_82433068)
 DOAX2_NATIVE60_POS_PROBE(sub_82433138)
 DOAX2_NATIVE60_POS_PROBE(sub_824332E8)
 DOAX2_NATIVE60_POS_PROBE(sub_82433598)
-DOAX2_NATIVE60_POS_PROBE(sub_82433740)
 DOAX2_NATIVE60_POS_PROBE(sub_82433C08)
-DOAX2_NATIVE60_POS_PROBE(sub_82433CD0)
 DOAX2_NATIVE60_POS_PROBE(sub_82434838)
 DOAX2_NATIVE60_POS_PROBE(sub_82434900)
 DOAX2_NATIVE60_POS_PROBE(sub_82434C38)
@@ -5679,7 +5798,6 @@ DOAX2_NATIVE60_POS_PROBE(sub_82699514)
 DOAX2_NATIVE60_POS_PROBE(sub_82699518)
 DOAX2_NATIVE60_POS_PROBE(sub_82699578)
 DOAX2_NATIVE60_POS_PROBE(sub_82699698)
-DOAX2_NATIVE60_POS_PROBE(sub_82699980)
 DOAX2_NATIVE60_POS_PROBE(sub_826999F0)
 DOAX2_NATIVE60_POS_PROBE(sub_82699A58)
 DOAX2_NATIVE60_POS_PROBE(sub_82699C28)
@@ -6095,6 +6213,7 @@ REX_HOOK_RAW(sub_82668CC8) {
 // the boot movies: log every sound request for 25 s after a movie starts or
 // is skipped (experimental logging).
 inline std::atomic<int64_t> native60_movie_event_ms{-1000000};
+inline std::atomic<int64_t> native60_title_voice_ms{-1000000};
 inline int64_t Native60NowMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -6139,12 +6258,11 @@ inline void Request(const char* name, PPCContext& ctx, uint8_t* base, F&& call) 
   // Drop a second title voice within 3 s.
   bool title_voice_repeat = false;
   if (lr == 0x824C0E10) {
-    static std::atomic<int64_t> last_title_voice_ms{-1000000};
     const int64_t now = Native60NowMs();
-    title_voice_repeat = now - last_title_voice_ms.load() < 3000;
-    if (!title_voice_repeat) last_title_voice_ms = now;
+    title_voice_repeat = now - native60_title_voice_ms.load() < 3000;
+    if (!title_voice_repeat) native60_title_voice_ms = now;
     else REXLOG_INFO("DOAX2 title voice requested again {} ms after the first: skipped (event {})",
-                     now - last_title_voice_ms.load(), int32_t(event));
+                     now - native60_title_voice_ms.load(), int32_t(event));
   }
   const bool skip = (repeat && half && enabled && event != 0xFFFFFFFFu) || title_voice_repeat;
   const double volume = ctx.f1.f64;
@@ -7962,21 +8080,12 @@ inline uint32_t Native60ScreenUpdateFunction(uint8_t* base) {
 // option ignores the game's own stops on the way), so a new playlist starts
 // when the game is entered again.
 //
-// Skipping the boot movies enters the title twice, 14 updates apart (log
-// test-v1.0.0 002: voice dropped 234 ms after the first). The second entry
-// restarts the title and cut the first voice off mid-line, so a second
-// entry within 2 s of the first, right after a boot movie, is skipped.
+// Skipping the boot movies enters the title twice, 14 updates apart; the
+// second voice request is dropped by the sound hook above. The entry itself
+// must always run: the title code retries it every update until it does, and
+// skipping it left the title unfinished so the idle demo movie looped.
 REX_EXTERN(__imp__sub_824C0B78);
 REX_HOOK_RAW(sub_824C0B78) {
-  static int64_t last_entry_ms = -1000000;
-  const int64_t now = Native60NowMs();
-  const bool after_movie = now - native60_movie_event_ms.load() < 10000;
-  if (after_movie && now - last_entry_ms < 2000) {
-    REXLOG_INFO("DOAX2 title screen entered again {} ms after the first (boot movie skip): skipped, lr={:08X}",
-                now - last_entry_ms, uint32_t(ctx.lr));
-    return;
-  }
-  last_entry_ms = now;
   if (rex::audio::GetTitlePlaylistDiagnostics().playing) {
     rex::audio::StopTitlePlaylist();
     REXLOG_INFO("DOAX2 title screen entered: title music stopped");
@@ -7985,11 +8094,20 @@ REX_HOOK_RAW(sub_824C0B78) {
   __imp__sub_824C0B78(ctx, base);
 }
 
-// Sound stops by priority (82669180) after the boot movies are logged, in
-// case anything else cuts the title voice.
+// Sound stops by priority (82669180) after the boot movies are logged. The
+// title reset 824C0FB0 stops every sound (level 0, call at 824C0FFC) between
+// the two title entries after skipped boot movies, which cut the title voice
+// off mid-line (logs game-exp 008/009); that stop is dropped while the title
+// voice from the last 3 s is playing.
 REX_EXTERN(__imp__sub_82669180);
 REX_HOOK_RAW(sub_82669180) {
-  if (Native60NowMs() - native60_movie_event_ms.load() < 10000) {
+  const int64_t now = Native60NowMs();
+  if (uint32_t(ctx.lr) == 0x824C0FFC && now - native60_movie_event_ms.load() < 10000 &&
+      now - native60_title_voice_ms.load() < 3000) {
+    REXLOG_INFO("DOAX2 sound stop (82669180) by the title reset: skipped, title voice playing");
+    return;
+  }
+  if (now - native60_movie_event_ms.load() < 10000) {
     static uint32_t lines = 0;
     if (++lines <= 50)
       REXLOG_INFO("DOAX2 sound stop (82669180): level={} lr={:08X}", ctx.r3.u32, uint32_t(ctx.lr));

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.1
+
+- **Winnings Multiplier is experimental.**
+- Casino payouts now show the multiplied amount while you play:
+  - blackjack win popup and table chips, including double down, split and
+    insurance payouts;
+  - roulette spin winnings and chips (your money is right as soon as you
+    leave the table);
+  - poker win counter and balance.
+- Minigame payout screens show every prize and bonus multiplied, and the
+  total matches the money you receive.
+- Launcher: the "DOAX2 is running" message clears when the game closes.
+
 ## 1.1
 
 - New launcher option in Settings: **Winnings Multiplier** (Normal, 10x,
