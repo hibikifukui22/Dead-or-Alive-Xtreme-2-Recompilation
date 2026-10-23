@@ -77,6 +77,29 @@ networking, tries its System Link socket, gets "network down" and carries on.
 library (`WS2_32.dll`). The game executable, the graphics DLL and the
 launcher link no network libraries.
 
+## Local communication
+
+Nothing else talks to other programs, either on the network or on the same
+PC:
+
+- **Debug output.** Log lines and the game's debug prints go to Windows
+  debug output (`OutputDebugString`) only while a debugger is attached to
+  the game. Debug output viewers such as DebugView receive nothing.
+  See `sdk/rexglue-sdk/src/core/dbg_win.cpp` and spdlog's `msvc_sink`,
+  which checks for a debugger by default.
+- **Debug symbols.** The diagnostic tools (Diagnostic Logging in 60 FPS
+  mode, and the write watch) read symbols only from local folders: the game
+  folder, or `out\game` and `out\native60-build`. They never read
+  `_NT_SYMBOL_PATH`, so they cannot reach a symbol server.
+- **Profiler.** Release builds do not include the Tracy profiler client,
+  which would otherwise listen on a TCP port.
+- **Launcher.** The launcher starts the game, waits for it to close and can
+  open the logs folder in Explorer. It has no network code.
+
+These local connections are needed and left in place: Direct3D 12 to the
+graphics driver, audio output, controller input (XInput, SDL/HID), and file
+access to the game, save and log folders.
+
 ## Turning networking back on
 
 Use this only for development, for example to work on System Link.

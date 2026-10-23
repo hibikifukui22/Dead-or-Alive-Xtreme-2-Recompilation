@@ -8,6 +8,9 @@
   send, receive and lookup call fails as if no network cable is connected.
   Developers can turn networking back on with `--guest_network=true`; see
   docs/NETWORK.md.
+- No local communication either: debug output is only sent while a debugger
+  is attached, and the diagnostic tools load debug symbols from the game
+  folder only, never from a symbol server.
 
 ## 1.1.1
 
