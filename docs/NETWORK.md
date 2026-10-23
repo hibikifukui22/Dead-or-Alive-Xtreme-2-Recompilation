@@ -74,8 +74,16 @@ A normal play session logs exactly these two lines: the game starts
 networking, tries its System Link socket, gets "network down" and carries on.
 
 `rexruntime.dll` is the only shipped binary that links the Windows network
-library (`WS2_32.dll`). The game executable, the graphics DLL and the
-launcher link no network libraries.
+library (`WS2_32.dll`), and it delay-loads it
+(`/DELAYLOAD:ws2_32.dll` in `sdk/rexglue-sdk/src/system/CMakeLists.txt`).
+The DLL is loaded only when a Winsock function is first called, which
+happens only with `guest_network` on. The game executable, the graphics DLL
+and the launcher link no network libraries.
+
+You may still see `WS2_32.dll` in the game's loaded modules. Windows' own
+window and input component (`CoreMessaging.dll`, loaded by every program
+with a window) links it. Nothing in the game calls it; no socket or port is
+opened, so Windows Firewall has nothing to ask about.
 
 ## Local communication
 

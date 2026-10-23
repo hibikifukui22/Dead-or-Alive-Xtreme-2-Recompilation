@@ -17537,6 +17537,22 @@ index 1254710..71f8ec3 100644
    namespace xenos = rex::graphics::xenos;
  
    xenos::xe_gpu_texture_fetch_t gpu_fetch;
+diff --git a/src/system/CMakeLists.txt b/src/system/CMakeLists.txt
+index fc46d86..c9df239 100644
+--- a/src/system/CMakeLists.txt
++++ b/src/system/CMakeLists.txt
+@@ -106,7 +106,10 @@ if(REXGLUE_ENABLE_PERF_COUNTERS)
+ endif()
+ 
+ if(WIN32)
+-    target_link_libraries(rexruntime PRIVATE ws2_32)
++    # Winsock is delay-loaded: with guest_network off (the default) no
++    # Winsock function is called, so ws2_32.dll is never loaded.
++    target_link_libraries(rexruntime PRIVATE ws2_32 delayimp)
++    target_link_options(rexruntime PRIVATE "LINKER:/DELAYLOAD:ws2_32.dll")
+     target_link_libraries(rexruntime PUBLIC dxgi dxguid)
+     target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
+ endif()
 diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
 index 306118e..f7c3489 100644
 --- a/src/ui/d3d12/d3d12_presenter.cpp
