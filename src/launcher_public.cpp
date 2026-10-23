@@ -39,7 +39,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.1.1";
+constexpr const wchar_t* kVersion = L"v1.1.2";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;

@@ -25,7 +25,7 @@ runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 > Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
 > All trademarks belong to their respective owners.
 
-Current version: **1.1.1** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.1.2** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Supported game version
 
@@ -52,6 +52,18 @@ Title updates are not supported.
    an explanation.
 
 Saves are written to the `userdata` folder next to the launcher.
+
+## Network access
+
+DOAX2 Recomp does not use the internet or your local network. Since v1.1.2
+every network call is blocked, so the game never opens a network port and
+Windows Firewall has nothing to ask about.
+
+Before v1.1.2, Windows could show a firewall prompt for `doax2.exe`. The
+original Xbox 360 game prepares a System Link port (UDP 1000) when it
+starts, and that made Windows ask. Nothing was ever sent or downloaded, and
+it was safe to block. Developers can read [docs/NETWORK.md](docs/NETWORK.md)
+for the details and for how to turn networking back on.
 
 ## System requirements
 

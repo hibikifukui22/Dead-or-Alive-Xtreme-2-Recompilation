@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.2
+
+- All network access is blocked. The game no longer opens a network port
+  (UDP 1000, the original game's System Link port), so Windows Firewall no
+  longer asks about doax2.exe. Winsock is never started, and every socket,
+  send, receive and lookup call fails as if no network cable is connected.
+  Developers can turn networking back on with `--guest_network=true`; see
+  docs/NETWORK.md.
+
 ## 1.1.1
 
 - **Winnings Multiplier is experimental.**

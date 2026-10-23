@@ -1,4 +1,4 @@
-DOAX2 Recomp v1.1.1 - native PC port of Dead or Alive Xtreme 2 (Xbox 360)
+DOAX2 Recomp v1.1.2 - native PC port of Dead or Alive Xtreme 2 (Xbox 360)
 
 This package does NOT include the game. You need your own copy of
 Dead or Alive Xtreme 2 for the Xbox 360 (retail disc, title ID 544307D2).
@@ -18,6 +18,11 @@ Requirements: Windows 10/11 x64, a DirectX 12 graphics card (RTX 2060 Super /
 RX 6600 XT class or faster for 1080p, see the project page). The Visual C++ runtime
 DLLs are included next to the game; if it still fails to start, install the
 latest Microsoft Visual C++ 2015-2022 Redistributable (x64).
+
+Network: the game does not use the internet or your network. Every
+network call is blocked, so Windows Firewall should not ask about doax2.exe.
+(Older versions could show that prompt; it came from the original game's
+System Link code and was safe to block.)
 
 Reporting problems: include the newest file(s) from out\game\logs
 (doax2_<number>.log). Never share game files.
