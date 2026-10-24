@@ -102,11 +102,46 @@ PC:
 - **Profiler.** Release builds do not include the Tracy profiler client,
   which would otherwise listen on a TCP port.
 - **Launcher.** The launcher starts the game, waits for it to close and can
-  open the logs folder in Explorer. It has no network code.
+  open the logs folder in Explorer. Its only network code is the updater
+  (see below).
 
 These local connections are needed and left in place: Direct3D 12 to the
 graphics driver, audio output, controller input (XInput, SDL/HID), and file
 access to the game, save and log folders.
+
+## Launcher updates
+
+Since v1.1.3 the launcher has an **UPDATE** page
+(`src/launcher_public.cpp`, section "update"). It is the only part of DOAX2
+Recomp that goes online, and only when the player opens that page; nothing
+runs in the background and the game itself stays offline.
+
+- Opening the page sends one HTTPS request to
+  `https://api.github.com/repos/hibikifukui22/Dead-or-Alive-Xtreme-2-Recompilation/releases/latest`
+  (Windows' WinHTTP, user agent `DOAX2-Recomp-Launcher/<version>`). Nothing
+  else is sent: no settings, logs, saves or identifiers.
+- **INSTALL UPDATE** downloads that release's `SHA256SUMS.txt` and
+  `DOAX2-Recomp-v<version>-win64.zip` from github.com, checks the zip's
+  SHA-256, unpacks it with Windows' `tar.exe` into
+  `%TEMP%\DOAX2-Recomp-update` and copies the program files over the
+  install. `userdata`, `config` and `extracted game files here` are never
+  touched. Replaced files are backed up and restored if a copy fails. The
+  running launcher is renamed to `*.update-old` and removed on its next
+  start.
+- Only `https://api.github.com/` and `https://github.com/` addresses are
+  accepted (GitHub's download redirects are followed). Outgoing requests do
+  not trigger a Windows Firewall prompt, since nothing listens on a port.
+
+For testing an update without publishing a release, set
+`DOAX2_UPDATE_URL` to a local release JSON, for example
+`http://127.0.0.1:8765/latest.json`, whose `browser_download_url` entries also
+point at `http://127.0.0.1` or `http://localhost`:
+
+```json
+{"tag_name": "v9.9.9", "assets": [
+  {"browser_download_url": "http://127.0.0.1:8765/SHA256SUMS.txt"},
+  {"browser_download_url": "http://127.0.0.1:8765/DOAX2-Recomp-v9.9.9-win64.zip"}]}
+```
 
 ## Turning networking back on
 

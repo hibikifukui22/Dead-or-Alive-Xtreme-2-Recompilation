@@ -19,6 +19,9 @@ $patterns.Add('[A-Za-z]:[\\/]Users[\\/]')
 $regex = [regex]::new(($patterns -join '|'), 'IgnoreCase')
 # Files that must never be published (saves, profiles, logs, game data).
 $forbidden = [regex]::new('(^|[\\/])(userdata|logs|captures)([\\/]|$)|\.(log|dmp|rdc|iso|xex|xexp|sfd|xwb|xgs|afs|stfs)$|(^|[\\/])launcher\.ini$|B13EBABEBABEBABE', 'IgnoreCase')
+# The project's public GitHub repository (the launcher's updater and the docs
+# link to it) may name the owner account.
+$allowed = [regex]::new('[A-Za-z0-9-]+/Dead-or-Alive-Xtreme-2-Recompilation', 'IgnoreCase')
 # Files allowed to mention C:\Users in documentation of this check itself.
 $selfName = 'check-personal-data.ps1'
 
@@ -26,7 +29,8 @@ $problems = [System.Collections.Generic.List[string]]::new()
 function Test-Text([string]$name, [byte[]]$bytes) {
     if ($forbidden.IsMatch($name)) { $problems.Add("forbidden file: $name"); return }
     if ($name -like "*$selfName") { return }
-    foreach ($text in @([Text.Encoding]::UTF8.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes))) {
+    foreach ($raw in @([Text.Encoding]::UTF8.GetString($bytes), [Text.Encoding]::Unicode.GetString($bytes))) {
+        $text = $allowed.Replace($raw, 'REPOSITORY')
         $m = $regex.Match($text)
         if ($m.Success) {
             $start = [Math]::Max(0, $m.Index - 30)

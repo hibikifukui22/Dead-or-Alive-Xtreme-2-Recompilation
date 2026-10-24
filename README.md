@@ -25,7 +25,7 @@ runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 > Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
 > All trademarks belong to their respective owners.
 
-Current version: **1.1.2** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.1.3** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Supported game version
 
@@ -49,15 +49,66 @@ Title updates are not supported.
    inside it.
 3. Run `DOAX2 Recomp Launcher.exe`, choose 30 or 60 FPS and press **PLAY**.
    **Settings** and **Graphics Settings** hold the other options, each with
-   an explanation.
+   an explanation. **Input** sets the keyboard keys and player 1's
+   controller buttons (experimental). **Update** installs the newest
+   release (see [Updating](#updating)).
 
 Saves are written to the `userdata` folder next to the launcher.
 
+## Updating
+
+From v1.1.3 on, the launcher can update itself:
+
+1. Press **Update** on the launcher's main screen. It checks GitHub for the
+   latest release and shows your version and the newest one.
+2. If a newer version is available, press **Install Update**. Progress bars
+   show each step: the download, a SHA-256 check against the release's
+   `SHA256SUMS.txt`, unpacking and installing.
+3. Press **Restart Launcher** when it is done.
+
+Updating keeps your saves (`userdata`), your settings (`config`) and your
+game files (`extracted game files here`). If a file cannot be replaced, the
+update stops and your previous version is restored. Close the game before
+updating. The launcher only goes online while the Update page is open.
+
+Versions before v1.1.3 have no Update page: download the new release zip
+and extract it over your existing folder (or copy your `userdata` and
+`config` folders into the new one).
+
+## Controls
+
+Xbox, PlayStation, Switch and most other controllers work. The game reads
+buttons by their position, so the bottom face button (Xbox A, PlayStation
+Cross, Switch B) confirms.
+
+The keyboard also works as a controller, together with a connected pad.
+Default keys:
+
+| Controller | Key |
+| --- | --- |
+| Start / Back | Enter / Tab |
+| A / B / X / Y | Space / Backspace / F / R |
+| LB / RB / LT / RT | Q / E / Z / C |
+| Left stick (click) | W A S D (V) |
+| Right stick (click) | I J K L (H) |
+| D-pad | Arrow keys |
+
+The launcher's **Input** page (experimental) changes them: the Keyboard tab
+sets two keys for every controller input, and the Controller tab remaps
+player 1's controller buttons, triggers and stick directions. Each tab has
+**Reset to Defaults**.
+
 ## Network access
 
-DOAX2 Recomp does not use the internet or your local network. Since v1.1.2
+The game does not use the internet or your local network. Since v1.1.2
 every network call is blocked, so the game never opens a network port and
 Windows Firewall has nothing to ask about.
+
+The only exception is the launcher's **Update** page (since v1.1.3). Only
+while you open it, it asks GitHub for the latest release, and **Install
+Update** downloads it, checks its SHA-256 checksum and replaces the program
+files. Your saves, settings and game files are kept. Nothing about you or
+your PC is sent.
 
 Before v1.1.2, Windows could show a firewall prompt for `doax2.exe`. The
 original Xbox 360 game prepares a System Link port (UDP 1000) when it

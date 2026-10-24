@@ -16805,6 +16805,208 @@ index 305380e..a9ea857 100644
  
    assert_true(x0 < x1 && y0 < y1);
    if (x0 >= x1 || y0 >= y1) {
+diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
+index 813bb1c..e237848 100644
+--- a/src/input/input_system.cpp
++++ b/src/input/input_system.cpp
+@@ -11,6 +11,8 @@
+ 
+ #include <algorithm>
+ #include <cmath>
++#include <mutex>
++#include <string_view>
+ 
+ #include <rex/dbg.h>
+ #include <rex/input/device_assignment.h>
+@@ -28,6 +30,10 @@ REXCVAR_DEFINE_STRING(input_backend, "sdl", "Input", "Input backend: sdl, xinput
+     .allowed({"sdl", "xinput"});
+ 
+ REXCVAR_DEFINE_BOOL(guide_button, false, "Input", "Enable guide button pass-through");
++REXCVAR_DEFINE_STRING(pad_remap, "", "Input",
++                      "Player 1 controller remap, 'input=source[,source];...' with the keybind_* "
++                      "names (a, left_shoulder, lstick_up, dpad_left, ...). Unlisted inputs keep "
++                      "their own button; 'input=' leaves one unbound. Keyboard input is not remapped");
+ namespace rex::input {
+ 
+ namespace {
+@@ -37,6 +43,163 @@ namespace {
+ // flag and never reads this value.
+ constexpr uint32_t kSyntheticOrdinal = UINT32_MAX;
+ 
++// Controller inputs a remap reads and writes. Each has a level from 0 to
++// 32768: buttons are 0 or full, triggers are scaled up, and each stick
++// direction is the deflection that way.
++enum PadInput {
++  kPadA, kPadB, kPadX, kPadY, kPadLB, kPadRB, kPadLT, kPadRT, kPadBack, kPadStart,
++  kPadLS, kPadRS, kPadLUp, kPadLDown, kPadLLeft, kPadLRight, kPadRUp, kPadRDown,
++  kPadRLeft, kPadRRight, kPadDUp, kPadDDown, kPadDLeft, kPadDRight, kPadInputCount
++};
++
++constexpr const char* kPadInputNames[kPadInputCount] = {
++    "a", "b", "x", "y", "left_shoulder", "right_shoulder", "left_trigger", "right_trigger",
++    "back", "start", "lstick_press", "rstick_press", "lstick_up", "lstick_down", "lstick_left",
++    "lstick_right", "rstick_up", "rstick_down", "rstick_left", "rstick_right", "dpad_up",
++    "dpad_down", "dpad_left", "dpad_right"};
++
++// Button bit of each input, 0 for the triggers and stick directions.
++constexpr uint16_t kPadInputButtons[kPadInputCount] = {
++    X_INPUT_GAMEPAD_A, X_INPUT_GAMEPAD_B, X_INPUT_GAMEPAD_X, X_INPUT_GAMEPAD_Y,
++    X_INPUT_GAMEPAD_LEFT_SHOULDER, X_INPUT_GAMEPAD_RIGHT_SHOULDER, 0, 0,
++    X_INPUT_GAMEPAD_BACK, X_INPUT_GAMEPAD_START, X_INPUT_GAMEPAD_LEFT_THUMB,
++    X_INPUT_GAMEPAD_RIGHT_THUMB, 0, 0, 0, 0, 0, 0, 0, 0,
++    X_INPUT_GAMEPAD_DPAD_UP, X_INPUT_GAMEPAD_DPAD_DOWN, X_INPUT_GAMEPAD_DPAD_LEFT,
++    X_INPUT_GAMEPAD_DPAD_RIGHT};
++
++constexpr int32_t kPadFull = 32768;
++// A stick direction drives a button once it is pushed halfway.
++constexpr int32_t kPadStickPress = kPadFull / 2;
++
++// Sources of every input, as bit masks of PadInput; parsed from pad_remap.
++struct PadRemap {
++  std::string text;
++  bool identity = true;
++  uint32_t sources[kPadInputCount] = {};
++};
++
++int PadInputIndex(std::string_view name) {
++  for (int i = 0; i < kPadInputCount; ++i) {
++    if (name == kPadInputNames[i]) {
++      return i;
++    }
++  }
++  return -1;
++}
++
++void ParsePadRemap(PadRemap& remap, const std::string& text) {
++  remap.text = text;
++  remap.identity = true;
++  for (int i = 0; i < kPadInputCount; ++i) {
++    remap.sources[i] = 1u << i;
++  }
++  std::string_view rest(text);
++  while (!rest.empty()) {
++    const size_t semicolon = rest.find(';');
++    std::string_view entry = rest.substr(0, semicolon);
++    rest = semicolon == std::string_view::npos ? std::string_view() : rest.substr(semicolon + 1);
++    const size_t equals = entry.find('=');
++    if (equals == std::string_view::npos) {
++      continue;
++    }
++    const int input = PadInputIndex(entry.substr(0, equals));
++    if (input < 0) {
++      continue;
++    }
++    uint32_t sources = 0;
++    std::string_view list = entry.substr(equals + 1);
++    while (!list.empty()) {
++      const size_t comma = list.find(',');
++      const int source = PadInputIndex(list.substr(0, comma));
++      if (source >= 0) {
++        sources |= 1u << source;
++      }
++      list = comma == std::string_view::npos ? std::string_view() : list.substr(comma + 1);
++    }
++    remap.sources[input] = sources;
++    if (sources != 1u << input) {
++      remap.identity = false;
++    }
++  }
++}
++
++void ApplyPadRemap(X_INPUT_GAMEPAD& pad) {
++  static std::mutex mutex;
++  static PadRemap remap;
++  uint32_t sources[kPadInputCount];
++  {
++    std::lock_guard lock(mutex);
++    const std::string& text = REXCVAR_GET(pad_remap);
++    if (text != remap.text) {
++      ParsePadRemap(remap, text);
++    }
++    if (remap.identity) {
++      return;
++    }
++    std::copy(std::begin(remap.sources), std::end(remap.sources), sources);
++  }
++  const uint16_t buttons = static_cast<uint16_t>(pad.buttons);
++  const int32_t lx = static_cast<int16_t>(pad.thumb_lx), ly = static_cast<int16_t>(pad.thumb_ly);
++  const int32_t rx = static_cast<int16_t>(pad.thumb_rx), ry = static_cast<int16_t>(pad.thumb_ry);
++  int32_t level[kPadInputCount] = {};
++  bool pressed[kPadInputCount] = {};
++  for (int i = 0; i < kPadInputCount; ++i) {
++    if (kPadInputButtons[i]) {
++      pressed[i] = (buttons & kPadInputButtons[i]) != 0;
++      level[i] = pressed[i] ? kPadFull : 0;
++    }
++  }
++  level[kPadLT] = pad.left_trigger * kPadFull / 255;
++  level[kPadRT] = pad.right_trigger * kPadFull / 255;
++  pressed[kPadLT] = pad.left_trigger >= kTriggerThreshold;
++  pressed[kPadRT] = pad.right_trigger >= kTriggerThreshold;
++  const int32_t sticks[] = {ly, -ly, -lx, lx, ry, -ry, -rx, rx};
++  for (int i = 0; i < 8; ++i) {
++    level[kPadLUp + i] = std::max(sticks[i], 0);
++    pressed[kPadLUp + i] = level[kPadLUp + i] >= kPadStickPress;
++  }
++
++  auto out_level = [&](int input) {
++    int32_t value = 0;
++    for (int s = 0; s < kPadInputCount; ++s) {
++      if (sources[input] & (1u << s)) {
++        value = std::max(value, level[s]);
++      }
++    }
++    return value;
++  };
++  uint16_t out_buttons = buttons & X_INPUT_GAMEPAD_GUIDE;
++  for (int i = 0; i < kPadInputCount; ++i) {
++    if (!kPadInputButtons[i]) {
++      continue;
++    }
++    for (int s = 0; s < kPadInputCount; ++s) {
++      if ((sources[i] & (1u << s)) && pressed[s]) {
++        out_buttons |= kPadInputButtons[i];
++        break;
++      }
++    }
++  }
++  // A trigger fed only by itself keeps its exact value.
++  auto trigger = [&](int input, uint8_t original) -> uint8_t {
++    if (sources[input] == 1u << input) {
++      return original;
++    }
++    return static_cast<uint8_t>(std::min(out_level(input) * 255 / kPadFull, int32_t(255)));
++  };
++  auto axis = [&](int positive, int negative) -> int16_t {
++    return static_cast<int16_t>(std::clamp(out_level(positive) - out_level(negative),
++                                           int32_t(INT16_MIN), int32_t(INT16_MAX)));
++  };
++  pad.buttons = out_buttons;
++  pad.left_trigger = trigger(kPadLT, pad.left_trigger);
++  pad.right_trigger = trigger(kPadRT, pad.right_trigger);
++  pad.thumb_lx = axis(kPadLRight, kPadLLeft);
++  pad.thumb_ly = axis(kPadLUp, kPadLDown);
++  pad.thumb_rx = axis(kPadRRight, kPadRLeft);
++  pad.thumb_ry = axis(kPadRUp, kPadRDown);
++}
++
+ }  // namespace
+ 
+ InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
+@@ -233,6 +396,13 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+     if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
+       continue;
+     }
++    // Player 1's controllers only; the keyboard has its own key binds.
++    if (user_index == 0) {
++      const DeviceInfo* info = DeviceInfoFor(id);
++      if (info && !info->synthetic) {
++        ApplyPadRemap(state.gamepad);
++      }
++    }
+     active_devices_.Observe(user_index, id, state.gamepad);
+     if (!any) {
+       merged = state;
 diff --git a/src/kernel/xam/apps/xmp_app.cpp b/src/kernel/xam/apps/xmp_app.cpp
 index a5e9088..0e22668 100644
 --- a/src/kernel/xam/apps/xmp_app.cpp

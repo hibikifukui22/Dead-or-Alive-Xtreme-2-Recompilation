@@ -33,7 +33,7 @@ constexpr int kKeepSong = 117;
 
 // Frame rate modes.
 //   30  Stable 30 FPS: out/game/doax2.exe, production settings, no diagnostics.
-//   65  60 FPS stable v1.1.2: out/game-60/doax2.60fps-stable.exe (own rexruntime.dll with
+//   65  60 FPS stable v1.1.3: out/game-60/doax2.60fps-stable.exe (own rexruntime.dll with
 //       the XMP song info fix and keep-song option; out/game in the tester package) at native
 //       60 FPS (base game speed halved, display-locked vblank), no diagnostics.
 //       Permanent fixes are promoted here from the experimental build.
@@ -42,7 +42,7 @@ constexpr int kKeepSong = 117;
 //   31  30 FPS reference (experimental build): same executable and probes at
 //       the original 30 Hz rate, for side-by-side diagnostic comparisons.
 // Tester launcher (DOAX2_TESTER_LAUNCHER, target doax2_tester_launcher): only
-// "60 FPS stable v1.1.2", optional diagnostic logging and the FPS overlay; game
+// "60 FPS stable v1.1.3", optional diagnostic logging and the FPS overlay; game
 // files are read from "extracted game files here".
 #ifdef DOAX2_TESTER_LAUNCHER
 constexpr bool kTester = true;
@@ -281,7 +281,7 @@ void Launch(HWND window) {
   }
   // The experimental executable keeps one fixed name so the NVIDIA per-app
   // profile (RTX 3090) stays assigned between builds.
-  // The experimental build (out/game-exp) and 60 FPS stable v1.1.2
+  // The experimental build (out/game-exp) and 60 FPS stable v1.1.3
   // (out/game-60) run from their own folders when present: their
   // rexruntime.dll (XMP song title/artist fix, keep-song option) leaves the
   // 30 FPS stable runtime in out/game untouched. The tester package keeps
@@ -497,10 +497,10 @@ void BuildControls(HWND window, const Settings& settings) {
   set_font(AddLabel(window, L"Frame rate", 24, 302));
   HWND frame_rate = AddCombo(window, kFrameRate, 250, 298, 230);
   if (kTester) {
-    AddComboValue(frame_rate, L"60 FPS stable v1.1.2 (with logging)", kStable60, true);
+    AddComboValue(frame_rate, L"60 FPS stable v1.1.3 (with logging)", kStable60, true);
   } else {
   AddComboValue(frame_rate, L"30 FPS (stable)", kStable30, settings.frame_rate_mode == kStable30);
-  AddComboValue(frame_rate, L"60 FPS stable v1.1.2", kStable60, settings.frame_rate_mode == kStable60);
+  AddComboValue(frame_rate, L"60 FPS stable v1.1.3", kStable60, settings.frame_rate_mode == kStable60);
   AddComboValue(frame_rate, L"60 FPS (experimental)", kNative60, settings.frame_rate_mode == kNative60);
   AddComboValue(frame_rate, L"30 FPS reference (experimental build)", kReference30,
                 settings.frame_rate_mode == kReference30);

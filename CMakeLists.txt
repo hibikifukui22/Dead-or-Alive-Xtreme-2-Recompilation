@@ -61,7 +61,9 @@ if(WIN32)
     set(LAUNCHER_RESOURCE_DIR "${CMAKE_SOURCE_DIR}/resources/launcher")
     configure_file(resources/launcher/launcher.rc.in "${CMAKE_BINARY_DIR}/launcher_public.rc" @ONLY)
     add_executable(doax2_public_launcher WIN32 src/launcher_public.cpp "${CMAKE_BINARY_DIR}/launcher_public.rc")
-    target_link_libraries(doax2_public_launcher PRIVATE gdiplus shlwapi)
+    # SDL3 (static, as in the runtime) reads every controller type for the
+    # controller tab of the Input page.
+    target_link_libraries(doax2_public_launcher PRIVATE gdiplus shlwapi winhttp bcrypt SDL3::SDL3-static)
     set_target_properties(doax2_public_launcher PROPERTIES
         OUTPUT_NAME "DOAX2 Recomp Launcher"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/public")

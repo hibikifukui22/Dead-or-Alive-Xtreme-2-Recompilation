@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.1.3
+
+- **Input page is experimental.**
+- Keyboard controls work: the keyboard acts as a controller (together with
+  a connected pad), so Enter presses Start on the title screen. Earlier
+  versions did not read the keyboard in the game.
+- New **Input** page in the launcher, with the controller diagram:
+  - Keyboard tab: two keys for every controller input, keyboard on/off,
+    Reset to Defaults.
+  - Controller tab: remap player 1's buttons, triggers and stick
+    directions; picking a button that is in use swaps the two. Detects
+    Xbox, PlayStation, Switch and other controllers and shows their own
+    button names. Reset to Defaults.
+- New **Update** page in the launcher: checks GitHub for the latest
+  release, then downloads it, verifies its SHA-256 checksum, extracts it and
+  installs it, with a progress bar for every step. Saves, settings and game
+  files are kept, and the previous version is restored if anything fails.
+  It only goes online while the page is open (see docs/NETWORK.md).
+- Runtime: new `pad_remap` setting for player 1's controller (keyboard
+  input is not remapped).
+
 ## 1.1.2
 
 - All network access is blocked. The game no longer opens a network port
