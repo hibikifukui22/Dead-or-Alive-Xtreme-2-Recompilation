@@ -1533,7 +1533,13 @@ Doax2CensusSlot* Doax2CensusRegister(const char* name) {
 void DumpNative60Census(uint8_t* base) {
   static uint64_t updates = 0, window = 0;
   static std::vector<uint64_t> previous;
-  static FILE* file = std::fopen("out/game/logs/doax2_census.csv", "w");
+  // One file per run, named by frame rate, so 30 / 60 FPS runs can be compared.
+  static FILE* file = std::fopen(
+      fmt::format("out/game/logs/doax2_census_{}fps_{}.csv", REXCVAR_GET(doax2_engine_60fps) ? 60 : 30,
+                  std::chrono::duration_cast<std::chrono::seconds>(
+                      std::chrono::system_clock::now().time_since_epoch()).count())
+          .c_str(),
+      "w");
   static const auto start = std::chrono::steady_clock::now();
   if (!file || ++updates % 30 != 0) return;
   const double seconds = std::chrono::duration<double>(
@@ -3843,6 +3849,63 @@ REX_HOOK_RAW(sub_82699980) {
   __imp__sub_82699980(ctx, base);
   REX_STORE_U32(kSoFar, so_far);
 }
+// Pool Hopping (minigame 2, camera modes 3/10/8): the minigame fiber
+// 826999F0 sets up its state at 83952DE0 (826955E0) and then calls
+// 82695940(state) once per update. Its timers all step by +-1 per update
+// (intro/outro lengths, the partner's hops, how long the hop button is held,
+// the minigame clock +18340 and the pads' motion pairs, logs 026/027), so at
+// 60 FPS the whole minigame ran at double speed and short taps read as long
+// hops. Every word of the state block that stepped by +-1 on this update and
+// the previous one (a running counter) is held back on every other step;
+// one-off changes (hop counts, phase changes) are never held, and neither is
+// a countdown reaching zero.
+REX_EXTERN(__imp__sub_82695940);
+REX_HOOK_RAW(sub_82695940) {
+  constexpr uint32_t kState = 0x83952DE0, kWords = 0x5000 / 4;
+  const bool scaled = float(REXCVAR_GET(doax2_native60_tick_scale)) == 0.5f && ctx.r3.u32 == kState;
+  if (!scaled) {
+    __imp__sub_82695940(ctx, base);
+    return;
+  }
+  Native60MarkMinigameUpdate();
+  static std::array<uint32_t, kWords> before{};
+  static std::array<int8_t, kWords> last_step{};  // +-1 when the word stepped by +-1 last update
+  static std::array<bool, kWords> hold{};
+  static uint64_t calls = 0, held_total = 0;
+  for (uint32_t i = 0; i < kWords; ++i) before[i] = REX_LOAD_U32(kState + i * 4);
+  __imp__sub_82695940(ctx, base);
+  uint32_t held = 0;
+  for (uint32_t i = 0; i < kWords; ++i) {
+    const uint32_t now = REX_LOAD_U32(kState + i * 4);
+    const int32_t delta = int32_t(now - before[i]);
+    const int8_t step = delta == 1 ? 1 : delta == -1 ? -1 : 0;
+    const bool running = step != 0 && last_step[i] == step;
+    last_step[i] = step;
+    if (!running) {
+      hold[i] = false;
+      continue;
+    }
+    if (step == -1 && now == 0) continue;  // whatever is due at zero fires once
+    hold[i] = !hold[i];
+    if (!hold[i]) continue;
+    REX_STORE_U32(kState + i * 4, before[i]);
+    ++held;
+  }
+  held_total += held;
+  ++calls;
+  if (REXCVAR_GET(doax2_native60_counter_scan) && (calls <= 3 || calls % 60 == 0)) {
+    static const auto start = std::chrono::steady_clock::now();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    REXLOG_INFO("DOAX2 native60 pool hopping: t={:.3f} calls={} held_now={} held_total={} clock={} "
+                "camera_mode={} engine_frame={}",
+                t, calls, held, held_total, int32_t(REX_LOAD_U32(kState + 18340)),
+                Native60SceneIndex(base) < 8 && REX_LOAD_U32(0x839BC0F0 + 928)
+                    ? REX_LOAD_U32(REX_LOAD_U32(0x839BC0F0 + 928) + Native60SceneIndex(base) * 4144 + 3580)
+                    : 0u,
+                Doax2EngineFrameCount());
+  }
+}
+
 // Add money (r3 = amount): positive amounts outside the wrapped payout code
 // are minigame prizes.
 REX_EXTERN(__imp__sub_826CAAA8);

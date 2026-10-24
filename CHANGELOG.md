@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4
+
+- Pool Hopping at 60 FPS runs at the original speed: the intro and outro
+  length, your partner's hops (she no longer finishes at double speed) and
+  the hop timing (quick taps give short hops again) all match 30 FPS.
+- Known issue: the camera pan at the start of the Pool Hopping intro can
+  hitch a few times at 60 FPS; a fix is in progress.
+
 ## 1.1.3
 
 - **Input page is experimental.**

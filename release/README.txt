@@ -1,4 +1,4 @@
-DOAX2 Recomp v1.1.3 - native PC port of Dead or Alive Xtreme 2 (Xbox 360)
+DOAX2 Recomp v1.1.4 - native PC port of Dead or Alive Xtreme 2 (Xbox 360)
 
 This package does NOT include the game. You need your own copy of
 Dead or Alive Xtreme 2 for the Xbox 360 (retail disc, title ID 544307D2).
