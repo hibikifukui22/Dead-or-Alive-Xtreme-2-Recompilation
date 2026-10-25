@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4a (experimental pre-release)
+
+- Test build for players whose frame rate drops while the game window is
+  focused (for example with G-SYNC, frame limiters, forced V-Sync or
+  overlays): the renderer paints and presents on its own GPU queue, so a
+  present that waits on the display can no longer stall the game.
+  Runtime setting `d3d12_separate_present_queue` (on in this build).
+
 ## 1.1.4
 
 - Pool Hopping at 60 FPS runs at the original speed: the intro and outro

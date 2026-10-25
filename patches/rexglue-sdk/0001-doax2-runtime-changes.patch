@@ -2077,10 +2077,18 @@ index d939d62..6586268 100644
    rex::thread::global_critical_region global_critical_region_;
    std::unordered_map<uint32_t, Playlist*> playlists_;
 diff --git a/include/rex/ui/d3d12/d3d12_presenter.h b/include/rex/ui/d3d12/d3d12_presenter.h
-index 83d09f7..b755dde 100644
+index 83d09f7..9d1dfa3 100644
 --- a/include/rex/ui/d3d12/d3d12_presenter.h
 +++ b/include/rex/ui/d3d12/d3d12_presenter.h
-@@ -102,6 +102,18 @@ class D3D12Presenter final : public Presenter {
+@@ -12,6 +12,7 @@
+ #pragma once
+ 
+ #include <array>
++#include <atomic>
+ #include <memory>
+ #include <utility>
+ 
+@@ -102,6 +103,18 @@ class D3D12Presenter final : public Presenter {
                                std::function<bool(GuestOutputRefreshContext& context)> refresher,
                                bool& is_8bpc_out) override;
  
@@ -2099,7 +2107,7 @@ index 83d09f7..b755dde 100644
    PaintResult PaintAndPresentImpl(bool execute_ui_drawers) override;
  
   private:
-@@ -289,6 +301,14 @@ class D3D12Presenter final : public Presenter {
+@@ -289,6 +302,14 @@ class D3D12Presenter final : public Presenter {
        guest_output_paint_intermediate_pipelines_;
    std::array<Microsoft::WRL::ComPtr<ID3D12PipelineState>, size_t(GuestOutputPaintEffect::kCount)>
        guest_output_paint_final_pipelines_;
@@ -2114,10 +2122,22 @@ index 83d09f7..b755dde 100644
  
    // The first is the refresher submission tracker fence value at which the
    // guest output texture was last refreshed, the second is the reference to the
-@@ -301,6 +321,11 @@ class D3D12Presenter final : public Presenter {
+@@ -301,6 +322,23 @@ class D3D12Presenter final : public Presenter {
    // paint_context_.guest_output_resource_paint_refs references taken from
    // guest_output_resources_).
    D3D12SubmissionTracker guest_output_resource_refresher_submission_tracker_;
++  // Dedicated queue for painting and presenting (d3d12_separate_present_queue)
++  // so that a Present waiting on the display (G-SYNC, frame limiters, forced
++  // V-Sync, overlays) holds only this queue and not the guest GPU emulation's.
++  // Null when painting uses the provider's direct queue.
++  Microsoft::WRL::ComPtr<ID3D12CommandQueue> present_queue_;
++  ID3D12CommandQueue* GetPresentQueue() const {
++    return present_queue_ ? present_queue_.Get() : provider_.GetDirectQueue();
++  }
++  // With the dedicated queue, the paint submission that last read each guest
++  // output mailbox slot; the refresher's queue waits for it before rewriting
++  // the slot.
++  std::array<std::atomic<UINT64>, kGuestOutputMailboxSize> guest_output_last_paint_{};
 +  uint64_t guest_output_ownership_frames_ = 0;
 +  uint64_t guest_output_ownership_checks_ = 0;
 +  uint64_t guest_output_ownership_failures_ = 0;
@@ -2126,7 +2146,7 @@ index 83d09f7..b755dde 100644
  
    // UI submission tracker with the submission index that can be given to UI
    // drawers (accessible from the UI thread only, at any time).
-@@ -312,6 +337,17 @@ class D3D12Presenter final : public Presenter {
+@@ -312,6 +350,17 @@ class D3D12Presenter final : public Presenter {
    // well as by presenter initialization and shutdown.
    PaintContext paint_context_;
  
@@ -2144,6 +2164,20 @@ index 83d09f7..b755dde 100644
  #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
    void* temporal_upscaler_context_ = nullptr;
    uint32_t temporal_upscaler_max_render_width_ = 0;
+diff --git a/include/rex/ui/d3d12/d3d12_submission_tracker.h b/include/rex/ui/d3d12/d3d12_submission_tracker.h
+index 2ca1704..69434a7 100644
+--- a/include/rex/ui/d3d12/d3d12_submission_tracker.h
++++ b/include/rex/ui/d3d12/d3d12_submission_tracker.h
+@@ -60,6 +60,9 @@ class D3D12SubmissionTracker {
+   // If false is returned, it's also not guaranteed that GetCompletedSubmission
+   // will return a value >= submission_index.
+   bool AwaitSubmissionCompletion(UINT64 submission_index);
++  // The fence the tracker signals (value = submission index), for waits on
++  // another queue.
++  ID3D12Fence* GetFence() const { return fence_.Get(); }
+   bool AwaitAllSubmissionsCompletion() {
+     return AwaitSubmissionCompletion(GetCurrentSubmission() - 1);
+   }
 diff --git a/include/rex/ui/overlay/debug_overlay.h b/include/rex/ui/overlay/debug_overlay.h
 index e15e410..577b659 100644
 --- a/include/rex/ui/overlay/debug_overlay.h
@@ -17756,7 +17790,7 @@ index fc46d86..c9df239 100644
      target_compile_definitions(rexruntime PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
  endif()
 diff --git a/src/ui/d3d12/d3d12_presenter.cpp b/src/ui/d3d12/d3d12_presenter.cpp
-index 306118e..f7c3489 100644
+index 306118e..0763a5a 100644
 --- a/src/ui/d3d12/d3d12_presenter.cpp
 +++ b/src/ui/d3d12/d3d12_presenter.cpp
 @@ -10,6 +10,7 @@
@@ -17767,13 +17801,22 @@ index 306118e..f7c3489 100644
  #include <climits>
  #include <cmath>
  #include <memory>
-@@ -33,6 +34,27 @@
+@@ -33,6 +34,36 @@
  REXCVAR_DEFINE_BOOL(d3d12_allow_variable_refresh_rate_and_tearing, true, "UI/D3D12",
                      "Allow variable refresh rate and tearing");
  
 +REXCVAR_DEFINE_BOOL(d3d12_vsync, true, "UI/D3D12",
 +                    "Synchronize D3D12 presentation to the monitor refresh rate")
 +    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(d3d12_separate_present_queue, true, "UI/D3D12",
++                    "Paint and present on a dedicated command queue, so a present that waits on the "
++                    "display (G-SYNC, frame limiters, forced V-Sync, overlays) cannot stall GPU emulation")
++    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
++
++REXCVAR_DEFINE_BOOL(d3d12_doax2_present_restart, true, "UI/D3D12",
++                    "Testing: discard presents still queued when a new one arrives (false keeps "
++                    "them, which makes Present wait on the display like G-SYNC or frame limiters)");
 +
 +REXCVAR_DEFINE_INT32(d3d12_vsync_interval, 1, "UI/D3D12",
 +                     "Host vertical blanks to wait between presented frames (1-4)")
@@ -17795,7 +17838,7 @@ index 306118e..f7c3489 100644
  namespace rex::ui::d3d12 {
  
  // Generated with `xb buildshaders`.
-@@ -58,6 +80,12 @@ D3D12Presenter::~D3D12Presenter() {
+@@ -58,6 +89,12 @@ D3D12Presenter::~D3D12Presenter() {
    paint_context_.AwaitSwapChainUsageCompletion();
    guest_output_resource_refresher_submission_tracker_.Shutdown();
    ui_submission_tracker_.Shutdown();
@@ -17808,7 +17851,7 @@ index 306118e..f7c3489 100644
  #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
    DestroyTemporalUpscalerContext();
  #endif
-@@ -408,7 +436,8 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+@@ -408,13 +445,14 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
      swap_chain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
      swap_chain_desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
      swap_chain_desc.Flags = 0;
@@ -17818,7 +17861,14 @@ index 306118e..f7c3489 100644
        // Allow tearing in borderless fullscreen to support variable refresh
        // rate.
        swap_chain_desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
-@@ -450,6 +479,31 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+     }
+     IDXGIFactory2* dxgi_factory = provider_.GetDXGIFactory();
+-    ID3D12CommandQueue* direct_queue = provider_.GetDirectQueue();
++    ID3D12CommandQueue* direct_queue = GetPresentQueue();
+     Microsoft::WRL::ComPtr<IDXGISwapChain1> swap_chain_1;
+     switch (surface_type) {
+ #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_GAMES)
+@@ -450,6 +488,31 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
      paint_context_.swap_chain_height = new_swap_chain_height;
      paint_context_.swap_chain_allows_tearing =
          (swap_chain_desc.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING) != 0;
@@ -17850,7 +17900,7 @@ index 306118e..f7c3489 100644
      for (uint32_t i = 0; i < PaintContext::kSwapChainBufferCount; ++i) {
        if (FAILED(paint_context_.swap_chain->GetBuffer(
                i, IID_PPV_ARGS(&paint_context_.swap_chain_buffers[i])))) {
-@@ -478,7 +532,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
+@@ -478,7 +541,7 @@ D3D12Presenter::ConnectOrReconnectPaintingToSurfaceFromUIThread(Surface& new_sur
          provider_.OffsetRTVDescriptor(rtv_heap_start, PaintContext::kRTVIndexSwapChainBuffer0 + i));
    }
  
@@ -17859,7 +17909,7 @@ index 306118e..f7c3489 100644
    return SurfacePaintConnectResult::kSuccess;
  }
  
-@@ -486,9 +540,108 @@ void D3D12Presenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
+@@ -486,9 +549,108 @@ void D3D12Presenter::DisconnectPaintingFromSurfaceFromUIThreadImpl() {
    paint_context_.DestroySwapChain();
  }
  
@@ -17968,7 +18018,7 @@ index 306118e..f7c3489 100644
    assert_not_zero(frontbuffer_width);
    assert_not_zero(frontbuffer_height);
    std::pair<UINT64, Microsoft::WRL::ComPtr<ID3D12Resource>>& guest_output_resource_ref =
-@@ -527,16 +680,112 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
+@@ -527,16 +689,122 @@ bool D3D12Presenter::RefreshGuestOutputImpl(
                     frontbuffer_width, frontbuffer_height);
        return false;
      }
@@ -18010,6 +18060,16 @@ index 306118e..f7c3489 100644
 +      ++guest_output_ownership_failures_;
 +      REXLOG_ERROR("DOAX2 output mailbox: before-witness submission failed");
 +      return false;
++    }
++  }
++  if (present_queue_) {
++    // The slot may still be read by a paint on the present queue (the mailbox
++    // only orders the CPU side): make the guest GPU work that rewrites it wait
++    // for that paint, unless it has already completed.
++    const UINT64 last_paint = guest_output_last_paint_[mailbox_index].load(std::memory_order_acquire);
++    ID3D12Fence* paint_fence = paint_context_.paint_submission_tracker.GetFence();
++    if (last_paint && paint_fence && paint_fence->GetCompletedValue() < last_paint) {
++      provider_.GetDirectQueue()->Wait(paint_fence, last_paint);
 +    }
    }
    D3D12GuestOutputRefreshContext context(is_8bpc_out_ref, guest_output_resource_ref.second.Get());
@@ -18082,7 +18142,7 @@ index 306118e..f7c3489 100644
    return refresher_succeeded;
  }
  
-@@ -555,14 +804,19 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
+@@ -555,14 +823,19 @@ void D3D12Presenter::PaintContext::DestroySwapChain() {
  }
  
  Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawers) {
@@ -18102,12 +18162,16 @@ index 306118e..f7c3489 100644
    ID3D12CommandAllocator* command_allocator =
        paint_context_.command_allocators[current_paint_submission % command_allocator_count].Get();
    command_allocator->Reset();
-@@ -588,7 +842,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -588,12 +861,23 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
    GuestOutputProperties guest_output_properties;
    GuestOutputPaintConfig guest_output_paint_config;
    Microsoft::WRL::ComPtr<ID3D12Resource> guest_output_resource;
 -  {
 +  bool guest_output_painted = false;
++  // Mailbox slot read by this paint and the refresher submission that wrote
++  // it (dedicated present queue synchronization).
++  uint32_t paint_mailbox_index = UINT32_MAX;
++  UINT64 paint_producer_submission = 0;
 +  if (frame_interpolation_presenting_latest_) {
 +    guest_output_resource = frame_interpolation_latest_guest_output_;
 +    guest_output_properties = frame_interpolation_latest_properties_;
@@ -18116,7 +18180,14 @@ index 306118e..f7c3489 100644
      uint32_t guest_output_mailbox_index;
      std::unique_lock<std::mutex> guest_output_consumer_lock(ConsumeGuestOutput(
          guest_output_mailbox_index, &guest_output_properties, &guest_output_paint_config));
-@@ -601,6 +860,35 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+     if (guest_output_mailbox_index != UINT32_MAX) {
+       guest_output_resource = guest_output_resources_[guest_output_mailbox_index].second;
++      paint_mailbox_index = guest_output_mailbox_index;
++      paint_producer_submission = guest_output_resources_[guest_output_mailbox_index].first;
+     }
+     // Incremented the reference count of the guest output resource - safe to
+     // leave the consumer critical section now as everything here either will be
+@@ -601,6 +885,35 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
      // (and multiple threads can't paint the main target at the same time).
    }
  
@@ -18152,7 +18223,7 @@ index 306118e..f7c3489 100644
    if (guest_output_resource) {
      GuestOutputPaintFlow guest_output_flow = GetGuestOutputPaintFlow(
          guest_output_properties, paint_context_.swap_chain_width, paint_context_.swap_chain_height,
-@@ -630,48 +918,36 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -630,48 +943,36 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
        // Store the main target reference to the guest output texture so it's not
        // destroyed while it's still potentially in use by main target painting
        // queued on the GPU.
@@ -18223,7 +18294,7 @@ index 306118e..f7c3489 100644
          D3D12_SHADER_RESOURCE_VIEW_DESC guest_output_resource_srv_desc;
          guest_output_resource_srv_desc.Format = kGuestOutputFormat;
          guest_output_resource_srv_desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-@@ -682,11 +958,18 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -682,11 +983,18 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
          guest_output_resource_srv_desc.Texture2D.PlaneSlice = 0;
          guest_output_resource_srv_desc.Texture2D.ResourceMinLODClamp = 0.0f;
          device->CreateShaderResourceView(
@@ -18245,7 +18316,7 @@ index 306118e..f7c3489 100644
  
        // Make sure intermediate textures of the needed size are available, and
        // unneeded intermediate textures are destroyed.
-@@ -776,8 +1059,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -776,8 +1084,13 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
        }
  
        if (guest_output_flow.effect_count) {
@@ -18259,7 +18330,7 @@ index 306118e..f7c3489 100644
          if (guest_output_flow.effect_count > 1) {
            paint_context_.guest_output_intermediate_texture_last_usage = current_paint_submission;
          }
-@@ -923,13 +1211,24 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -923,13 +1236,24 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
                guest_output_paint_root_signatures_[size_t(guest_output_paint_root_signature_index)]
                    .Get());
  
@@ -18286,7 +18357,7 @@ index 306118e..f7c3489 100644
  
            GuestOutputPaintRectangleConstants effect_rect_constants;
            float effect_x_to_ndc = 2.0f / viewport.Width;
-@@ -991,6 +1290,19 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -991,6 +1315,19 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
  
            command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
            command_list->DrawInstanced(4, 1, 0, 0);
@@ -18306,7 +18377,23 @@ index 306118e..f7c3489 100644
            drew_graphics_effect = true;
          }
  
-@@ -1146,30 +1458,112 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+@@ -1142,34 +1479,127 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(bool execute_ui_drawe
+   // Execute and present.
+   command_list->Close();
+   ID3D12CommandList* execute_command_list = command_list;
+-  provider_.GetDirectQueue()->ExecuteCommandLists(1, &execute_command_list);
++  if (present_queue_ && paint_mailbox_index != UINT32_MAX) {
++    // The guest output is written on the emulation's queue: wait for it here,
++    // and record this paint so the slot is not rewritten before it is done.
++    ID3D12Fence* producer_fence = guest_output_resource_refresher_submission_tracker_.GetFence();
++    if (producer_fence && paint_producer_submission &&
++        producer_fence->GetCompletedValue() < paint_producer_submission) {
++      present_queue_->Wait(producer_fence, paint_producer_submission);
++    }
++    guest_output_last_paint_[paint_mailbox_index].store(
++        paint_context_.paint_submission_tracker.GetCurrentSubmission(), std::memory_order_release);
++  }
++  GetPresentQueue()->ExecuteCommandLists(1, &execute_command_list);
    if (execute_ui_drawers) {
      ui_submission_tracker_.NextSubmission();
    }
@@ -18351,7 +18438,7 @@ index 306118e..f7c3489 100644
 +  // interpolated pair, but using it on the following source frame cancels the
 +  // midpoint before the display can scan it out. Preserve the second present
 +  // so DXGI schedules midpoint -> source on consecutive host refreshes.
-+  if (!frame_interpolation_presenting_latest_) {
++  if (!frame_interpolation_presenting_latest_ && REXCVAR_GET(d3d12_doax2_present_restart)) {
 +    present_flags |= DXGI_PRESENT_RESTART;
 +  }
 +  const TimingClock::time_point present_begin = TimingClock::now();
@@ -18421,7 +18508,7 @@ index 306118e..f7c3489 100644
 -      return SUCCEEDED(present_result) ? PaintResult::kPresented : PaintResult::kNotPresented;
 +      result = SUCCEEDED(present_result) ? PaintResult::kPresented : PaintResult::kNotPresented;
 +      break;
-+  }
+   }
 +  if (interpolation_midpoint && result == PaintResult::kPresented) {
 +    frame_interpolation_presenting_latest_ = true;
 +    PaintResult latest_result = PaintAndPresentImpl(execute_ui_drawers);
@@ -18429,12 +18516,12 @@ index 306118e..f7c3489 100644
 +    if (latest_result != PaintResult::kPresented) {
 +      return latest_result;
 +    }
-   }
++  }
 +  return result;
  }
  
  bool D3D12Presenter::InitializeSurfaceIndependent() {
-@@ -1437,6 +1831,37 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+@@ -1437,15 +1867,62 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
          return false;
        }
      }
@@ -18472,6 +18559,43 @@ index 306118e..f7c3489 100644
    }
  
    // Initialize connection-independent parts of the painting context.
+ 
+   ID3D12CommandQueue* direct_queue = provider_.GetDirectQueue();
+ 
++  // Dedicated present queue. Frame interpolation keeps painting a previous
++  // guest output outside the mailbox, so it stays on the shared queue.
++  if (REXCVAR_GET(d3d12_separate_present_queue) && !REXCVAR_GET(d3d12_doax2_frame_interpolation)) {
++    D3D12_COMMAND_QUEUE_DESC present_queue_desc{};
++    present_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
++    present_queue_desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
++    present_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
++    if (SUCCEEDED(device->CreateCommandQueue(&present_queue_desc, IID_PPV_ARGS(&present_queue_)))) {
++      REXLOG_INFO("D3D12Presenter: painting and presenting on a dedicated command queue");
++    } else {
++      present_queue_.Reset();
++      REXLOG_WARN("D3D12Presenter: dedicated present queue unavailable, using the shared queue");
++    }
++  }
++  ID3D12CommandQueue* paint_queue = GetPresentQueue();
++
+   // Paint submission trackers.
+-  if (!paint_context_.paint_submission_tracker.Initialize(device, direct_queue) ||
+-      !paint_context_.present_submission_tracker.Initialize(device, direct_queue)) {
++  if (!paint_context_.paint_submission_tracker.Initialize(device, paint_queue) ||
++      !paint_context_.present_submission_tracker.Initialize(device, paint_queue)) {
+     return false;
+   }
+ 
+@@ -1505,7 +1982,8 @@ bool D3D12Presenter::InitializeSurfaceIndependent() {
+     return false;
+   }
+ 
+-  if (!ui_submission_tracker_.Initialize(device, direct_queue)) {
++  // UI drawers record into the paint command list.
++  if (!ui_submission_tracker_.Initialize(device, paint_queue)) {
+     return false;
+   }
+ 
 diff --git a/src/ui/overlay/debug_overlay.cpp b/src/ui/overlay/debug_overlay.cpp
 index 43d6c06..6089774 100644
 --- a/src/ui/overlay/debug_overlay.cpp
