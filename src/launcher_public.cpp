@@ -48,7 +48,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.1.4a";
+constexpr const wchar_t* kVersion = L"v1.1.5";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;
@@ -104,6 +104,8 @@ struct Settings {
   int scale = 1;
   int anisotropic = 3;
   bool native_2x_msaa = true;
+  bool native_renderer = true;           // D3D-aware render passes (tiling collapse, native clears)
+  bool display_refresh_compat = false;   // dedicated present queue
   bool vsync = true;
   bool fullscreen = false;
   int frame_rate_mode = kMode60;
@@ -264,6 +266,9 @@ Settings LoadSettings() {
   settings.scale = std::clamp(ReadInt(values, "resolution_scale", settings.scale), 1, 4);
   settings.anisotropic = std::clamp(ReadInt(values, "anisotropic_override", settings.anisotropic), -1, 5);
   settings.native_2x_msaa = ReadBool(values, "native_2x_msaa", settings.native_2x_msaa);
+  settings.native_renderer = ReadBool(values, "native_renderer", settings.native_renderer);
+  settings.display_refresh_compat =
+      ReadBool(values, "display_refresh_compatibility", settings.display_refresh_compat);
   settings.vsync = ReadBool(values, "vsync", settings.vsync);
   settings.fullscreen = ReadBool(values, "fullscreen", settings.fullscreen);
   settings.frame_rate_mode = ReadInt(values, "frame_rate_mode", settings.frame_rate_mode) == kMode30 ? kMode30 : kMode60;
@@ -306,6 +311,8 @@ void SaveSettings() {
          << "resolution_scale=" << s.scale << '\n'
          << "anisotropic_override=" << s.anisotropic << '\n'
          << "native_2x_msaa=" << (s.native_2x_msaa ? "true" : "false") << '\n'
+         << "native_renderer=" << (s.native_renderer ? "true" : "false") << '\n'
+         << "display_refresh_compatibility=" << (s.display_refresh_compat ? "true" : "false") << '\n'
          << "vsync=" << (s.vsync ? "true" : "false") << '\n'
          << "fullscreen=" << (s.fullscreen ? "true" : "false") << '\n'
          << "frame_rate_mode=" << s.frame_rate_mode << '\n'
@@ -566,6 +573,13 @@ void Launch(HWND window) {
       + L" --resolution_scale=" + std::to_wstring(s.scale)
       + L" --anisotropic_override=" + std::to_wstring(s.anisotropic)
       + L" --native_2x_msaa=" + true_false(s.native_2x_msaa)
+      // Native renderer: the game's D3D calls mark render passes in its command
+      // buffer; tiled passes are drawn once at full size, clears are host clears.
+      + L" --doax2_native_markers=" + true_false(s.native_renderer)
+      + L" --gpu_native_tiling=" + true_false(s.native_renderer)
+      + L" --gpu_native_clears=" + true_false(s.native_renderer)
+      // Display Refresh Compatibility: presents on their own GPU queue.
+      + L" --d3d12_separate_present_queue=" + true_false(s.display_refresh_compat)
       + L" --vsync=" + true_false(s.vsync)
       // Guest VBlank timing stays with the game; host presentation is not
       // serialized behind DXGI Present(1).
@@ -1763,6 +1777,12 @@ void PaintSettings(Graphics& g) {
        L"Shows the current frame rate in the corner of the game window.\n\n"
        L"Useful for checking that the game holds 30 or 60 FPS on your PC.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.fps_overlay); }},
+      {L"Display Refresh Compatibility",
+       L"Presents frames on a separate GPU queue, so a slow or blocking display (G-SYNC / FreeSync, "
+       L"frame limiters, overlays) cannot hold up the game's rendering.\n\n"
+       L"Turn it on if the frame rate drops a lot while the game window is focused but is fine when it "
+       L"is not. Leave it off otherwise: it can make frame pacing slightly less even.",
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.display_refresh_compat); }},
       {L"Diagnostic Logging",
        L"Writes detailed logs for bug reports to the out\\game\\logs folder.\n\n"
        L"It lowers performance, so leave it off for normal play and turn it on only when you are "
@@ -1774,7 +1794,7 @@ void PaintSettings(Graphics& g) {
        L"is one). Never share game files.",
        [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 24, OpenLogsFolder); }},
   };
-  PaintSubPage(g, L"SETTINGS", rows, RowStyle{112, 36, 0, true});
+  PaintSubPage(g, L"SETTINGS", rows, RowStyle{100, 36, 0, true});
 }
 
 void PaintGraphics(Graphics& g) {
@@ -1813,6 +1833,13 @@ void PaintGraphics(Graphics& g) {
          DrawSelector(g, r, s.native_2x_msaa ? L"Native 2x" : L"Emulated 2x",
                       [&s](int) { s.native_2x_msaa = !s.native_2x_msaa; });
        }},
+      {L"Native Renderer (Experimental)",
+       L"Draws the game's render passes the way the game describes them instead of emulating the Xbox "
+       L"360's 10 MB EDRAM: the main scene is drawn once instead of in two halves, and clears are done "
+       L"by your graphics card directly.\n\n"
+       L"Lowers CPU and GPU load. It is new: if you see anything drawn wrongly, turn it off, check "
+       L"whether the problem goes away, and report it.",
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.native_renderer); }},
       {L"Post-Process Anti-Aliasing",
        L"Adds FXAA, an extra edge-smoothing filter, to the final image. FXAA Extreme smooths more.\n\n"
        L"Both make the picture slightly softer and cost a little performance. Off keeps the original "
@@ -1839,7 +1866,7 @@ void PaintGraphics(Graphics& g) {
        L"V-sync.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.vsync); }},
   };
-  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{89, 34, 0, true});
+  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{79, 32, 0, true});
 }
 
 // The design space (1600 x 900) is scaled uniformly to fit the window and

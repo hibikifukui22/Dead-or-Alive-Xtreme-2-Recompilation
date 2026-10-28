@@ -14,6 +14,7 @@
 #include "doax2_fps_telemetry.h"
 #include "doax2_native60_phase.h"
 #include "doax2_native60_keyframe.h"
+#include "doax2_d3d_trace.h"
 
 #include <bit>
 #include <fstream>
@@ -8623,7 +8624,10 @@ REX_HOOK_RAW(sub_8258E778) {
   REX_EXTERN(__imp__##name); \
   REX_HOOK_RAW(name) { \
     RecordPassCall(address, ctx); \
+    doax2_d3d_trace::Call(address, ctx, base); \
+    const auto d3d_args = doax2_d3d_trace::Args::From(ctx); \
     __imp__##name(ctx, base); \
+    doax2_d3d_trace::After(address, d3d_args, ctx, base); \
   }
 DOAX2_PASS_HOOK(sub_82703438, 0x82703438)
 DOAX2_PASS_HOOK(sub_82703768, 0x82703768)
@@ -8632,6 +8636,7 @@ DOAX2_PASS_HOOK(sub_82708CC0, 0x82708CC0)
 REX_EXTERN(__imp__sub_826FA358);
 REX_HOOK_RAW(sub_826FA358) {
   pass_trace.Draw();
+  doax2_d3d_trace::Call(doax2_d3d_trace::kDrawIndexed, ctx, base);
   bool supply = false;
   const uint32_t device = ctx.r3.u32;
   std::array<uint32_t, 8> saved{}, replacement{};
@@ -8674,6 +8679,7 @@ REX_HOOK_RAW(sub_826FA358) {
 REX_EXTERN(__imp__sub_826F9E58);
 REX_HOOK_RAW(sub_826F9E58) {
   pass_trace.InlineDraw();
+  doax2_d3d_trace::Call(doax2_d3d_trace::kDrawUP, ctx, base);
   __imp__sub_826F9E58(ctx, base);
 }
 
@@ -9286,6 +9292,7 @@ REX_HOOK_RAW(sub_8258E0D8) {
 #define DOAX2_PROFILE_PASS_HOOK(name, address) \
   REX_HOOK_RAW(name) { \
     RecordPassCall(address, ctx); \
+    doax2_d3d_trace::Call(address, ctx, base); \
     const bool profile = inside_guest_present; \
     const auto start = std::chrono::steady_clock::now(); \
     __imp__##name(ctx, base); \
@@ -9298,7 +9305,37 @@ DOAX2_PROFILE_PRESENT_HOOK(sub_8273BCA0, timing_present_prepare)
 DOAX2_PROFILE_PRESENT_HOOK(sub_827033A8, timing_present_flush)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82704D00, timing_present_queue)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82705BC8, timing_present_queue)
-DOAX2_PROFILE_PRESENT_HOOK(sub_82705D50, timing_present_swap)
+// Present (VdSwap): profiled like the other present stages, and the D3D
+// trace's frame boundary.
+REX_HOOK_RAW(sub_82705D50) {
+  doax2_d3d_trace::Present(base);
+  const bool profile = inside_guest_present;
+  const auto start = std::chrono::steady_clock::now();
+  __imp__sub_82705D50(ctx, base);
+  if (profile) RecordStage(timing_present_swap, start);
+}
+// D3D BeginTiling: native renderer marker.
+REX_EXTERN(__imp__sub_827088B8);
+REX_HOOK_RAW(sub_827088B8) {
+  const auto d3d_args = doax2_d3d_trace::Args::From(ctx);
+  __imp__sub_827088B8(ctx, base);
+  doax2_d3d_trace::After(doax2_d3d_trace::kBeginTiling, d3d_args, ctx, base);
+}
+// D3D ClearF: markers around it, so the GPU side can clear natively and skip
+// the clear's rectangle draws.
+REX_EXTERN(__imp__sub_826F86D0);
+REX_HOOK_RAW(sub_826F86D0) {
+  const auto d3d_args = doax2_d3d_trace::Args::From(ctx);
+  const bool marked = doax2_d3d_trace::ClearBegin(ctx, base);
+  __imp__sub_826F86D0(ctx, base);
+  if (marked) doax2_d3d_trace::ClearEnd(d3d_args, ctx, base);
+}
+// D3D internal per-surface clear: only traced.
+REX_EXTERN(__imp__sub_826F7BE8);
+REX_HOOK_RAW(sub_826F7BE8) {
+  doax2_d3d_trace::Call(doax2_d3d_trace::kClear, ctx, base);
+  __imp__sub_826F7BE8(ctx, base);
+}
 DOAX2_PROFILE_PRESENT_HOOK(sub_82704B40, timing_swap_flush)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82703B90, timing_swap_buffer)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82710F08, timing_swap_surface)

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.5
+
+- **Native Renderer (experimental, on by default):** new Graphics setting.
+  The renderer now follows the game's own render passes instead of only
+  emulating the Xbox 360's EDRAM: the main 3D scene is drawn once instead
+  of in two halves (about half the draw calls in 3D scenes), and clears are
+  done directly by the graphics card. Lower CPU and GPU load; see
+  docs/NATIVE-RENDERER.md. If anything looks wrong, turn it off and report
+  whether that fixes it.
+- **Display Refresh Compatibility** (Settings, off by default): presents
+  frames on a separate GPU queue (the 1.1.4a test build). Turn it on if the
+  frame rate drops a lot while the game window is focused.
+
 ## 1.1.4a (experimental pre-release)
 
 - Test build for players whose frame rate drops while the game window is

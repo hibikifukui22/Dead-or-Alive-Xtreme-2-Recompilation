@@ -16,6 +16,7 @@ include(generated/rexglue.cmake)
 set(DOAX2_SOURCES
     src/main.cpp
     src/doax2_60fps.cpp
+    src/doax2_d3d_trace.cpp
 )
 
 if(WIN32)
