@@ -40,6 +40,11 @@ Runtime settings (all off unless the launcher turns them on):
   render-target ownership transfers. A clear of whole surfaces (8-bit colour,
   depth + stencil) is done as a host clear of the render targets instead
   (`D3D12RenderTargetCache::NativeClear`) and its draws are skipped.
+- `gpu_force_1x_msaa` (launcher MSAA Mode "Off"): the game's multisampled
+  surfaces are drawn and resolved single-sampled (RB_SURFACE_INFO rewritten
+  per draw). D3D's own clear draws keep their sample counts, since they alias
+  surfaces with other sample counts; the clear values reach the single-sampled
+  render targets through the EDRAM ownership transfers. Needs the markers.
 - `gpu_native_marker_log`: diagnostics, logs one frame's markers and register
   state every 5 seconds.
 

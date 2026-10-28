@@ -76,7 +76,7 @@ index 0000000..78252c2
 +
 +}  // namespace rex::audio
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index da8e432..25cfb14 100644
+index da8e432..2233687 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -23,6 +23,7 @@
@@ -87,7 +87,7 @@ index da8e432..25cfb14 100644
  #include <rex/graphics/xenos.h>
  #include <rex/memory.h>
  #include <rex/memory/ring_buffer.h>
-@@ -171,6 +172,20 @@ class CommandProcessor {
+@@ -171,6 +172,21 @@ class CommandProcessor {
  
    uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
    virtual void OnPrimaryBufferEnd() {}
@@ -97,8 +97,9 @@ index da8e432..25cfb14 100644
 +  void LogNativeState(const char* what) const;
 +  void UpdateNativeTiling(uint32_t kind, const uint32_t* values, uint32_t count);
 +  bool NativeTilingCollapsing() const { return native_tiling_.active && native_tiling_.collapse; }
-+  bool IssueNativeTilingDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
-+                             IndexBufferInfo* index_buffer_info, bool major_mode_explicit);
++  bool DrawNeedsOverrides() const;
++  bool IssueDrawWithOverrides(xenos::PrimitiveType prim_type, uint32_t index_count,
++                              IndexBufferInfo* index_buffer_info, bool major_mode_explicit);
 +  bool BuildNativeClear(const uint32_t* values, uint32_t count,
 +                        draw_util::ResolveInfo& info) const;
 +  // Native clear (gpu_native_clears): a clear-only resolve of the host render
@@ -108,7 +109,7 @@ index da8e432..25cfb14 100644
    void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
    bool ExecutePacket(memory::RingBuffer* reader);
    bool ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet);
-@@ -268,6 +283,29 @@ class CommandProcessor {
+@@ -268,6 +284,30 @@ class CommandProcessor {
  
    bool paused_ = false;
  
@@ -133,6 +134,7 @@ index da8e432..25cfb14 100644
 +  NativeTiling native_tiling_;
 +  uint32_t native_tiling_skipped_ = 0;  // draws and resolves of skipped replays (logging)
 +  bool native_clear_skipping_ = false;   // between ClearBegin / ClearEnd of a native clear
++  bool native_in_clear_ = false;         // between ClearBegin / ClearEnd of any clear
 +  uint32_t native_clears_ = 0, native_clear_draws_skipped_ = 0;  // logging
 +
    // By default (such as for tools), post-processing is disabled.
@@ -2904,7 +2906,7 @@ index 225c7d9..4415c41 100644
  }  // namespace detail
  
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..af4e067 100644
+index a744375..3671a15 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,6 +10,8 @@
@@ -2935,7 +2937,7 @@ index a744375..af4e067 100644
  REXCVAR_DEFINE_BOOL(clear_memory_page_state, true, "GPU",
                      "Refresh page-valid state from GPU-written memory at frame end. "
                      "Disable for minor CPU overhead reduction, but may break memory coherency.")
-@@ -80,6 +87,27 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
+@@ -80,6 +87,31 @@ REXCVAR_DEFINE_BOOL(async_shader_compilation, true, "GPU",
                      "pipelines are being prepared.")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -2947,6 +2949,10 @@ index a744375..af4e067 100644
 +                    "Native renderer: render predicated-tiling passes once at full size "
 +                    "(needs the game's in-band D3D markers) instead of once per EDRAM tile");
 +
++REXCVAR_DEFINE_BOOL(gpu_force_1x_msaa, false, "GPU",
++                    "MSAA off: draw the game's multisampled surfaces without multisampling "
++                    "(faster; edges can be smoothed with swap_post_effect=fxaa). Needs the game's "
++                    "in-band D3D markers to keep its clears intact");
 +REXCVAR_DEFINE_INT32(gpu_native_clears_filter, 7, "GPU",
 +                     "Native clears: 1 = color-only, 2 = depth-only, 4 = color and depth "
 +                     "(diagnostics)");
@@ -2963,7 +2969,7 @@ index a744375..af4e067 100644
  namespace rex::graphics {
  
  using namespace rex::graphics::xenos;
-@@ -216,6 +244,7 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -216,6 +248,7 @@ void CommandProcessor::WorkerThreadMain() {
        // We've run out of commands to execute.
        // We spin here waiting for new ones, as the overhead of waiting on our
        // event is too high.
@@ -2971,7 +2977,7 @@ index a744375..af4e067 100644
        PrepareForWait();
        uint32_t loop_count = 0;
        do {
-@@ -232,6 +261,8 @@ void CommandProcessor::WorkerThreadMain() {
+@@ -232,6 +265,8 @@ void CommandProcessor::WorkerThreadMain() {
        } while (worker_running_ && pending_fns_.empty() &&
                 (write_ptr_index == 0xBAADF00D || read_ptr_index_ == write_ptr_index));
        ReturnFromWait();
@@ -2980,7 +2986,7 @@ index a744375..af4e067 100644
        if (!worker_running_ || !pending_fns_.empty()) {
          continue;
        }
-@@ -746,6 +777,13 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
+@@ -746,6 +781,13 @@ bool CommandProcessor::ExecutePacketType3(memory::RingBuffer* reader, uint32_t p
    // We also skip predicated swaps, as they are never valid (probably?).
    if (packet & 1) {
      bool any_pass = (bin_select_ & bin_mask_) != 0;
@@ -2994,7 +3000,7 @@ index a744375..af4e067 100644
      if (!any_pass || opcode == PM4_XE_SWAP) {
        reader->AdvanceRead(count * sizeof(uint32_t));
        return true;
-@@ -904,12 +942,281 @@ bool CommandProcessor::ExecutePacketType3_ME_INIT(memory::RingBuffer* reader, ui
+@@ -904,12 +946,307 @@ bool CommandProcessor::ExecutePacketType3_ME_INIT(memory::RingBuffer* reader, ui
  
  bool CommandProcessor::ExecutePacketType3_NOP(memory::RingBuffer* reader, uint32_t packet,
                                                uint32_t count) {
@@ -3021,12 +3027,14 @@ index a744375..af4e067 100644
 +  if (count) {
 +    UpdateNativeTiling(words[0], words + 1, count - 1);
 +    if (words[0] == 5) {
++      native_in_clear_ = true;
 +      draw_util::ResolveInfo clear_info;
 +      native_clear_skipping_ = REXCVAR_GET(gpu_native_clears) && !native_tiling_.active &&
 +                               BuildNativeClear(words + 1, count - 1, clear_info) &&
 +                               IssueNativeClear(clear_info);
 +      native_clears_ += native_clear_skipping_;
 +    } else if (words[0] == 6) {
++      native_in_clear_ = false;
 +      native_clear_skipping_ = false;
 +    }
 +  }
@@ -3161,7 +3169,9 @@ index a744375..af4e067 100644
 +  }
 +  reg::RB_SURFACE_INFO surface_info;
 +  surface_info.value = surface[0];
-+  const xenos::MsaaSamples msaa = surface_info.msaa_samples;
++  // With MSAA off, the surfaces the game's draws will use are single-sampled.
++  const xenos::MsaaSamples msaa =
++      REXCVAR_GET(gpu_force_1x_msaa) ? xenos::MsaaSamples::k1X : surface_info.msaa_samples;
 +  if (!surface_info.surface_pitch || msaa > xenos::MsaaSamples::k4X) {
 +    return false;
 +  }
@@ -3222,20 +3232,42 @@ index a744375..af4e067 100644
 +
 +bool CommandProcessor::IssueNativeClear(draw_util::ResolveInfo& info) { return false; }
 +
-+bool CommandProcessor::IssueNativeTilingDraw(xenos::PrimitiveType prim_type, uint32_t index_count,
-+                                             IndexBufferInfo* index_buffer_info,
-+                                             bool major_mode_explicit) {
++bool CommandProcessor::DrawNeedsOverrides() const {
++  return NativeTilingCollapsing() ||
++         (REXCVAR_GET(gpu_force_1x_msaa) && !native_in_clear_ &&
++          register_file_->Get<reg::RB_SURFACE_INFO>().msaa_samples != xenos::MsaaSamples::k1X);
++}
++
++// A draw or resolve with register overrides: collapsed tiling (see
++// UpdateNativeTiling) and MSAA off (gpu_force_1x_msaa: multisampled surfaces
++// drawn and resolved single-sampled; not D3D's clear draws, which alias
++// surfaces with other sample counts - their uniform values reach the
++// single-sampled render targets through the EDRAM ownership transfers).
++bool CommandProcessor::IssueDrawWithOverrides(xenos::PrimitiveType prim_type, uint32_t index_count,
++                                              IndexBufferInfo* index_buffer_info,
++                                              bool major_mode_explicit) {
 +  const NativeTiling& tiling = native_tiling_;
 +  RegisterFile& regs = *register_file_;
 +  const uint32_t saved_surface = regs[XE_GPU_REG_RB_SURFACE_INFO];
 +  const uint32_t saved_window_br = regs[XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR];
 +  const uint32_t saved_screen_br = regs[XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR];
++  if (REXCVAR_GET(gpu_force_1x_msaa) && !native_in_clear_) {
++    reg::RB_SURFACE_INFO surface_info;
++    surface_info.value = saved_surface;
++    surface_info.msaa_samples = xenos::MsaaSamples::k1X;
++    regs[XE_GPU_REG_RB_SURFACE_INFO] = surface_info.value;
++  }
++  if (!NativeTilingCollapsing()) {
++    const bool result = IssueDraw(prim_type, index_count, index_buffer_info, major_mode_explicit);
++    regs[XE_GPU_REG_RB_SURFACE_INFO] = saved_surface;
++    return result;
++  }
 +  // Widen what is the first tile's edge to the edge of all tiles.
 +  auto widen = [](uint32_t value, uint32_t mask, uint32_t shift, uint32_t from, uint32_t to) {
 +    return ((value >> shift) & mask) == from ? (value & ~(mask << shift)) | (to << shift) : value;
 +  };
-+  regs[XE_GPU_REG_RB_SURFACE_INFO] =
-+      widen(saved_surface, 0x3FFF, 0, tiling.tile_right, tiling.union_right);
++  regs[XE_GPU_REG_RB_SURFACE_INFO] = widen(regs[XE_GPU_REG_RB_SURFACE_INFO], 0x3FFF, 0,
++                                           tiling.tile_right, tiling.union_right);
 +  for (uint32_t reg : {uint32_t(XE_GPU_REG_PA_SC_WINDOW_SCISSOR_BR),
 +                       uint32_t(XE_GPU_REG_PA_SC_SCREEN_SCISSOR_BR)}) {
 +    regs[reg] = widen(widen(regs[reg], 0x7FFF, 0, tiling.tile_right, tiling.union_right), 0x7FFF,
@@ -3276,7 +3308,7 @@ index a744375..af4e067 100644
  bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, uint32_t packet,
                                                      uint32_t count) {
    SCOPE_profile_cpu_f("gpu");
-@@ -960,6 +1267,26 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -960,6 +1297,26 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
  
    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
  
@@ -3303,7 +3335,7 @@ index a744375..af4e067 100644
    ++counter_;
    return true;
  }
-@@ -977,6 +1304,13 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
+@@ -977,6 +1334,13 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
  
  bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reader, uint32_t packet,
                                                         uint32_t count) {
@@ -3317,7 +3349,7 @@ index a744375..af4e067 100644
    SCOPE_profile_cpu_f("gpu");
  
    // wait until a register or memory location is a specific value
-@@ -988,9 +1322,13 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -988,9 +1352,13 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
    uint32_t wait = reader->ReadAndSwap<uint32_t>();
  
    bool is_memory = (wait_info & 0x10) != 0;
@@ -3331,7 +3363,7 @@ index a744375..af4e067 100644
      uint32_t value = 0;
      if (is_memory) {
        value =
-@@ -1003,6 +1341,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1003,6 +1371,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
          value = ReadRegisterValue(poll_reg_addr);
        }
      }
@@ -3339,7 +3371,7 @@ index a744375..af4e067 100644
      switch (wait_info & 0x7) {
        case 0x0:  // Never.
          matched = false;
-@@ -1052,6 +1391,27 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1052,6 +1421,27 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
      }
    } while (!matched);
  
@@ -3367,7 +3399,7 @@ index a744375..af4e067 100644
    return true;
  }
  
-@@ -1378,8 +1738,29 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1378,8 +1768,31 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
  
        bool major_mode_explicit =
            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
@@ -3386,12 +3418,14 @@ index a744375..af4e067 100644
 +        // Drawing a clear done natively (IssueNativeClear).
 +        ++native_clear_draws_skipped_;
 +        draw_succeeded = true;
-+      } else if (NativeTilingCollapsing()) {
-+        native_tiling_skipped_ += native_tiling_.pass != 0;
++      } else if (NativeTilingCollapsing() && native_tiling_.pass != 0) {
++        // A later tile's replay of a collapsed tiled section.
++        ++native_tiling_skipped_;
++        draw_succeeded = true;
++      } else if (DrawNeedsOverrides()) {
 +        draw_succeeded =
-+            native_tiling_.pass != 0 ||
-+            IssueNativeTilingDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
-+                                  is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
++            IssueDrawWithOverrides(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
++                                   is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);
 +      } else {
 +        draw_succeeded = IssueDraw(vgt_draw_initiator.prim_type, vgt_draw_initiator.num_indices,
 +                                   is_indexed ? &index_buffer_info : nullptr, major_mode_explicit);

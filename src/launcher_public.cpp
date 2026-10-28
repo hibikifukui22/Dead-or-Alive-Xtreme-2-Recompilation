@@ -104,6 +104,7 @@ struct Settings {
   int scale = 1;
   int anisotropic = 3;
   bool native_2x_msaa = true;
+  bool msaa_off = false;                 // draw without MSAA (lower-end GPUs; pair with FXAA)
   bool native_renderer = true;           // D3D-aware render passes (tiling collapse, native clears)
   bool display_refresh_compat = false;   // dedicated present queue
   bool vsync = true;
@@ -266,6 +267,7 @@ Settings LoadSettings() {
   settings.scale = std::clamp(ReadInt(values, "resolution_scale", settings.scale), 1, 4);
   settings.anisotropic = std::clamp(ReadInt(values, "anisotropic_override", settings.anisotropic), -1, 5);
   settings.native_2x_msaa = ReadBool(values, "native_2x_msaa", settings.native_2x_msaa);
+  settings.msaa_off = ReadBool(values, "msaa_off", settings.msaa_off);
   settings.native_renderer = ReadBool(values, "native_renderer", settings.native_renderer);
   settings.display_refresh_compat =
       ReadBool(values, "display_refresh_compatibility", settings.display_refresh_compat);
@@ -312,6 +314,7 @@ void SaveSettings() {
          << "anisotropic_override=" << s.anisotropic << '\n'
          << "native_2x_msaa=" << (s.native_2x_msaa ? "true" : "false") << '\n'
          << "native_renderer=" << (s.native_renderer ? "true" : "false") << '\n'
+         << "msaa_off=" << (s.msaa_off ? "true" : "false") << '\n'
          << "display_refresh_compatibility=" << (s.display_refresh_compat ? "true" : "false") << '\n'
          << "vsync=" << (s.vsync ? "true" : "false") << '\n'
          << "fullscreen=" << (s.fullscreen ? "true" : "false") << '\n'
@@ -575,7 +578,9 @@ void Launch(HWND window) {
       + L" --native_2x_msaa=" + true_false(s.native_2x_msaa)
       // Native renderer: the game's D3D calls mark render passes in its command
       // buffer; tiled passes are drawn once at full size, clears are host clears.
-      + L" --doax2_native_markers=" + true_false(s.native_renderer)
+      // MSAA off also needs the markers (the game's clears are told apart).
+      + L" --doax2_native_markers=" + true_false(s.native_renderer || s.msaa_off)
+      + L" --gpu_force_1x_msaa=" + true_false(s.msaa_off)
       + L" --gpu_native_tiling=" + true_false(s.native_renderer)
       + L" --gpu_native_clears=" + true_false(s.native_renderer)
       // Display Refresh Compatibility: presents on their own GPU queue.
@@ -1827,11 +1832,19 @@ void PaintGraphics(Graphics& g) {
        }},
       {L"MSAA Mode",
        L"On the Xbox 360 the game smooths edges with 2x multisample anti-aliasing (MSAA).\n\n"
-       L"Native uses your graphics card's own 2x MSAA: fastest, and correct on most GPUs. Emulated "
-       L"uses a slower compatibility path; switch to it only if you see rendering problems.",
+       L"Native uses your graphics card's own 2x MSAA: correct on most GPUs. Emulated uses a slower "
+       L"compatibility path; switch to it only if you see rendering problems. Off draws without MSAA: "
+       L"the fastest, for lower-end graphics cards; turn on Post-Process Anti-Aliasing (FXAA) to "
+       L"smooth the edges instead.",
        [&s](Graphics& g, const RectF& r) {
-         DrawSelector(g, r, s.native_2x_msaa ? L"Native 2x" : L"Emulated 2x",
-                      [&s](int) { s.native_2x_msaa = !s.native_2x_msaa; });
+         // 0 = native 2x, 1 = emulated 2x, 2 = off.
+         int mode = s.msaa_off ? 2 : s.native_2x_msaa ? 0 : 1;
+         static const wchar_t* kNames[] = {L"Native 2x", L"Emulated 2x", L"Off (use FXAA)"};
+         DrawSelector(g, r, kNames[mode], [&s, mode](int direction) mutable {
+           StepOption(mode, std::vector<int>{0, 1, 2}, direction);
+           s.msaa_off = mode == 2;
+           if (mode != 2) s.native_2x_msaa = mode == 0;
+         });
        }},
       {L"Native Renderer (Experimental)",
        L"Draws the game's render passes the way the game describes them instead of emulating the Xbox "

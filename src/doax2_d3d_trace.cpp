@@ -149,14 +149,17 @@ void After(uint32_t function, const Args& args, PPCContext& ctx, uint8_t* base) 
 bool ClearBegin(PPCContext& ctx, uint8_t* base) {
   const uint32_t device = ctx.r3.u32;
   if (!REXCVAR_GET(doax2_native_markers) || !ValidGuest(device)) return false;
-  // Not in tiling or the other mode where ClearF clips to stored extents.
-  if (REX_LOAD_U8(device + 0x2A38) & 0x30) return false;
-  const uint32_t flags = ctx.r4.u32, rect = ctx.r5.u32, color = ctx.r6.u32;
+  uint32_t flags = ctx.r4.u32;
+  const uint32_t rect = ctx.r5.u32, color = ctx.r6.u32;
   const uint32_t rt0 = REX_LOAD_U32(device + 0x2F88), ds = REX_LOAD_U32(device + 0x2F98);
-  // Only render target 0 is described: not for clears of several color targets.
+  // Every clear is marked (its draws are told apart from the game's), but
+  // flags 0 = not to be done natively: in tiling or the other mode where
+  // ClearF clips to stored extents, or with several color targets (only
+  // render target 0 is described).
+  if (REX_LOAD_U8(device + 0x2A38) & 0x30) flags = 0;
   if (flags & 0xE)
     for (uint32_t i = 1; i < 4; ++i)
-      if (REX_LOAD_U32(device + 0x2F88 + 4 * i)) return false;
+      if (REX_LOAD_U32(device + 0x2F88 + 4 * i)) flags = 0;
   uint32_t payload[19] = {};
   payload[0] = kMarkerClearBegin;
   payload[1] = flags;

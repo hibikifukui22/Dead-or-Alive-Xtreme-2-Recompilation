@@ -9,6 +9,9 @@
   done directly by the graphics card. Lower CPU and GPU load; see
   docs/NATIVE-RENDERER.md. If anything looks wrong, turn it off and report
   whether that fixes it.
+- **MSAA Mode: Off (use FXAA)** (Graphics): draws the game without
+  multisample anti-aliasing, the fastest choice for lower-end graphics
+  cards; turn on Post-Process Anti-Aliasing (FXAA) to smooth edges instead.
 - **Display Refresh Compatibility** (Settings, off by default): presents
   frames on a separate GPU queue (the 1.1.4a test build). Turn it on if the
   frame rate drops a lot while the game window is focused.
