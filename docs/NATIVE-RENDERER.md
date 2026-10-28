@@ -37,9 +37,17 @@ Runtime settings (all off unless the launcher turns them on):
   target) and the later replays are skipped. About half the draws in 3D scenes.
 - `gpu_native_clears`: **native clears.** D3D's ClearF draws rectangles,
   partly through MSAA aliasing tricks, which the EDRAM model turns into
-  render-target ownership transfers. A clear of whole surfaces (8-bit colour,
-  depth + stencil) is done as a host clear of the render targets instead
-  (`D3D12RenderTargetCache::NativeClear`) and its draws are skipped.
+  render-target ownership transfers. A clear of 8-bit colour and / or depth
+  (with or without stencil), of the whole surface or a rectangle from its
+  origin, is done as a host clear of the render targets instead
+  (`D3D12RenderTargetCache::NativeClear`) and its draws are skipped. A tiled
+  section's surfaces cleared just before BeginTiling are cleared again at full
+  size for the collapsed pass.
+- `gpu_native_transfer_elision`: a draw of one rectangle (rectangle list,
+  quad, two triangles; covered area found by running the vertex shader on the
+  CPU, `DrawExtentEstimator::EstimateVertexRectangle`) whose result does not
+  depend on the render target (`draw_util::DrawWritesColorOpaquely`) gets the
+  area it covers cut out of the ownership transfers into its colour targets.
 - `gpu_force_1x_msaa` (launcher MSAA Mode "Off"): the game's multisampled
   surfaces are drawn and resolved single-sampled (RB_SURFACE_INFO rewritten
   per draw). D3D's own clear draws keep their sample counts, since they alias
@@ -56,8 +64,16 @@ Runtime settings (all off unless the launcher turns them on):
 | Pool Side, 4K: GPU busy | 13.3 ms | 12.0 ms |
 | Swimsuit menu, 4K: GPU busy | 18.2 ms | 17.4 ms |
 
+With the extended clears and transfer elision (same PC, FPS overlay off):
+
+| Scene (4K) | Emulated | Native |
+| --- | --- | --- |
+| Pool Side: GPU busy | 14.0 ms | 8.4 ms |
+| Swimsuit menu: GPU busy / command processor | 19.0 / 21.2 ms | 12.3 / 4.1 ms |
+
 ## Next steps
 
-Remaining render-target ownership transfers (render-to-texture passes that
-alias EDRAM), an MSAA-off mode (1x host render targets for the game's 2x
-surfaces, relying on FXAA), then the Vulkan backend for Android.
+Vulkan backend (Android): everything above lives in the shared command
+processor / render target cache / draw_util except `IssueNativeClear` (D3D12
+override) and passing `last_update_transfer_cutout()` to the transfer
+drawing; the Vulkan render target cache needs the same two hooks.

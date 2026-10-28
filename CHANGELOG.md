@@ -6,7 +6,10 @@
   The renderer now follows the game's own render passes instead of only
   emulating the Xbox 360's EDRAM: the main 3D scene is drawn once instead
   of in two halves (about half the draw calls in 3D scenes), and clears are
-  done directly by the graphics card. Lower CPU and GPU load; see
+  done directly by the graphics card, and full-screen passes no longer copy
+  render target contents they overwrite. In tests at 4K, GPU time dropped
+  by about 40% at the pool and 35% in the swimsuit menu. Lower CPU and GPU
+  load; see
   docs/NATIVE-RENDERER.md. If anything looks wrong, turn it off and report
   whether that fixes it.
 - **MSAA Mode: Off (use FXAA)** (Graphics): draws the game without

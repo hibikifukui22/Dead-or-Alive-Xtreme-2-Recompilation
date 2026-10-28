@@ -76,7 +76,7 @@ index 0000000..78252c2
 +
 +}  // namespace rex::audio
 diff --git a/include/rex/graphics/command_processor.h b/include/rex/graphics/command_processor.h
-index da8e432..2233687 100644
+index da8e432..6ca09d1 100644
 --- a/include/rex/graphics/command_processor.h
 +++ b/include/rex/graphics/command_processor.h
 @@ -23,6 +23,7 @@
@@ -87,7 +87,7 @@ index da8e432..2233687 100644
  #include <rex/graphics/xenos.h>
  #include <rex/memory.h>
  #include <rex/memory/ring_buffer.h>
-@@ -171,6 +172,21 @@ class CommandProcessor {
+@@ -171,6 +172,22 @@ class CommandProcessor {
  
    uint32_t ExecutePrimaryBuffer(uint32_t start_index, uint32_t end_index);
    virtual void OnPrimaryBufferEnd() {}
@@ -98,18 +98,19 @@ index da8e432..2233687 100644
 +  void UpdateNativeTiling(uint32_t kind, const uint32_t* values, uint32_t count);
 +  bool NativeTilingCollapsing() const { return native_tiling_.active && native_tiling_.collapse; }
 +  bool DrawNeedsOverrides() const;
++  void ClearCollapsedTilingSurfaces();
 +  bool IssueDrawWithOverrides(xenos::PrimitiveType prim_type, uint32_t index_count,
 +                              IndexBufferInfo* index_buffer_info, bool major_mode_explicit);
-+  bool BuildNativeClear(const uint32_t* values, uint32_t count,
-+                        draw_util::ResolveInfo& info) const;
++  bool BuildNativeClear(const uint32_t* values, uint32_t count, draw_util::ResolveInfo& info,
++                        bool& keep_stencil) const;
 +  // Native clear (gpu_native_clears): a clear-only resolve of the host render
 +  // targets. Returns whether it was done entirely (then the game's clear draws
-+  // are skipped).
-+  virtual bool IssueNativeClear(draw_util::ResolveInfo& info);
++  // are skipped). keep_stencil: clear the depth of a depth / stencil target only.
++  virtual bool IssueNativeClear(draw_util::ResolveInfo& info, bool keep_stencil);
    void ExecuteIndirectBuffer(uint32_t ptr, uint32_t length);
    bool ExecutePacket(memory::RingBuffer* reader);
    bool ExecutePacketType0(memory::RingBuffer* reader, uint32_t packet);
-@@ -268,6 +284,30 @@ class CommandProcessor {
+@@ -268,6 +285,35 @@ class CommandProcessor {
  
    bool paused_ = false;
  
@@ -135,13 +136,18 @@ index da8e432..2233687 100644
 +  uint32_t native_tiling_skipped_ = 0;  // draws and resolves of skipped replays (logging)
 +  bool native_clear_skipping_ = false;   // between ClearBegin / ClearEnd of a native clear
 +  bool native_in_clear_ = false;         // between ClearBegin / ClearEnd of any clear
++  // The last native clear, repeated at full size for a collapsed tiled section.
++  draw_util::ResolveInfo last_native_clear_ = {};
++  bool last_native_clear_keep_stencil_ = false;
++  bool last_native_clear_valid_ = false;
++  uint32_t draws_since_native_clear_ = 0;
 +  uint32_t native_clears_ = 0, native_clear_draws_skipped_ = 0;  // logging
 +
    // By default (such as for tools), post-processing is disabled.
    // "Desired" is for the external thread managing the post-processing effect.
    SwapPostEffect swap_post_effect_desired_ = SwapPostEffect::kNone;
 diff --git a/include/rex/graphics/d3d12/command_processor.h b/include/rex/graphics/d3d12/command_processor.h
-index 96d362b..d11d062 100644
+index 96d362b..6a722a2 100644
 --- a/include/rex/graphics/d3d12/command_processor.h
 +++ b/include/rex/graphics/d3d12/command_processor.h
 @@ -19,11 +19,13 @@
@@ -228,7 +234,7 @@ index 96d362b..d11d062 100644
    bool IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
                   IndexBufferInfo* index_buffer_info, bool major_mode_explicit) override;
    bool IssueCopy() override;
-+  bool IssueNativeClear(draw_util::ResolveInfo& info) override;
++  bool IssueNativeClear(draw_util::ResolveInfo& info, bool keep_stencil) override;
  
   private:
    static constexpr uint32_t kQueueFrames = 3;
@@ -893,7 +899,7 @@ index 7a9d6a2..b8e212b 100644
   private:
    REXPACKEDSTRUCT(ShaderStoredHeader, {
 diff --git a/include/rex/graphics/d3d12/render_target_cache.h b/include/rex/graphics/d3d12/render_target_cache.h
-index cd7693a..6742d33 100644
+index cd7693a..64267e7 100644
 --- a/include/rex/graphics/d3d12/render_target_cache.h
 +++ b/include/rex/graphics/d3d12/render_target_cache.h
 @@ -26,6 +26,7 @@
@@ -948,7 +954,7 @@ index cd7693a..6742d33 100644
    // frame for calling.
 +  // Clear-only resolve of host render targets described by the game's D3D
 +  // clear (CommandProcessor::IssueNativeClear); whether all was cleared.
-+  bool NativeClear(draw_util::ResolveInfo& info);
++  bool NativeClear(draw_util::ResolveInfo& info, bool keep_stencil);
    bool Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
                 D3D12TextureCache& texture_cache, uint32_t& written_address_out,
                 uint32_t& written_length_out);
@@ -1024,7 +1030,17 @@ index cd7693a..6742d33 100644
  
    // For host render targets.
  
-@@ -647,12 +728,13 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+@@ -633,6 +714,9 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+   // resolve_clear_rectangle is expected to be provided by
+   // PrepareHostRenderTargetsResolveClear which should do all the needed size
+   // bound checks.
++  // Depth clears in PerformTransfersAndResolveClears leave the stencil (native
++  // depth-only clears).
++  bool resolve_clear_keep_stencil_ = false;
+   void PerformTransfersAndResolveClears(
+       uint32_t render_target_count, RenderTarget* const* render_targets,
+       const std::vector<Transfer>* render_target_transfers,
+@@ -647,12 +731,13 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
    ID3D12PipelineState* GetOrCreateDirectResolvePipeline(DirectResolvePipelineKey key);
    bool TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
                                draw_util::ResolveCopyShaderIndex copy_shader,
@@ -1040,7 +1056,7 @@ index cd7693a..6742d33 100644
  
    bool use_stencil_reference_output_ = false;
  
-@@ -733,6 +815,18 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
+@@ -733,6 +818,18 @@ class D3D12RenderTargetCache final : public RenderTargetCache {
    uint64_t direct_resolve_success_count_ = 0;
    uint64_t direct_resolve_fallback_count_ = 0;
  
@@ -1347,7 +1363,7 @@ index ac6b056..e7d94c0 100644
    memory::Memory* memory_ = nullptr;
    runtime::FunctionDispatcher* function_dispatcher_ = nullptr;
 diff --git a/include/rex/graphics/pipeline/render_target/cache.h b/include/rex/graphics/pipeline/render_target/cache.h
-index 3bbd52e..2e84c26 100644
+index 3bbd52e..e11b760 100644
 --- a/include/rex/graphics/pipeline/render_target/cache.h
 +++ b/include/rex/graphics/pipeline/render_target/cache.h
 @@ -10,6 +10,7 @@
@@ -1358,7 +1374,18 @@ index 3bbd52e..2e84c26 100644
  #include <cmath>
  #include <cstdint>
  #include <functional>
-@@ -178,7 +179,14 @@ class RenderTargetCache {
+@@ -174,11 +175,25 @@ class RenderTargetCache {
+   virtual bool Update(bool is_rasterization_done, reg::RB_DEPTHCONTROL normalized_depth_control,
+                       uint32_t normalized_color_mask, const Shader& vertex_shader);
+ 
++  // Transfer elision (gpu_native_transfer_elision): before Update, whether the
++  // draw writes every color target it uses opaquely (no blending, full write
++  // mask, no kill / alpha test, no depth / stencil use). Update then finds the
++  // rectangle the draw covers and does not transfer the previous contents of
++  // that area into the color render targets.
++  void SetDrawWritesColorOpaquely(bool opaque) { draw_writes_color_opaquely_ = opaque; }
++
+   // Returns bits where 0 is whether a depth render target is currently bound on
    // the host and 1... are whether the same applies to color render targets, and
    // formats (resource formats, but if needed, with gamma taken into account) of
    // each.
@@ -1374,10 +1401,15 @@ index 3bbd52e..2e84c26 100644
  
   protected:
    RenderTargetCache(const RegisterFile& register_file, const memory::Memory& memory,
-@@ -496,6 +504,12 @@ class RenderTargetCache {
+@@ -496,6 +511,17 @@ class RenderTargetCache {
      assert_true(GetPath() == Path::kHostRenderTargets);
      return last_update_transfers_;
    }
++  // Area excluded from the last update's color transfers (transfer elision);
++  // null if none.
++  const Transfer::Rectangle* last_update_transfer_cutout() const {
++    return last_update_transfer_cutout_valid_ ? &last_update_transfer_cutout_ : nullptr;
++  }
 +  struct UpdateClaim {
 +    uint32_t key = 0;
 +    uint32_t first_tile = 0, end_tile = 0;
@@ -1387,7 +1419,18 @@ index 3bbd52e..2e84c26 100644
  
    HostDepthStoreRenderTargetConstant GetHostDepthStoreRenderTargetConstant(
        uint32_t pitch_tiles, bool msaa_2x_supported) const {
-@@ -684,6 +698,11 @@ class RenderTargetCache {
+@@ -555,6 +581,10 @@ class RenderTargetCache {
+ 
+   DrawExtentEstimator draw_extent_estimator_;
+ 
++  bool draw_writes_color_opaquely_ = false;
++  Transfer::Rectangle last_update_transfer_cutout_ = {};
++  bool last_update_transfer_cutout_valid_ = false;
++
+   // For host render targets.
+ 
+   struct OwnershipRange {
+@@ -684,6 +714,11 @@ class RenderTargetCache {
    // render targets. They are reordered so for one source, all transfers are
    // consecutive in the array.
    std::vector<Transfer> last_update_transfers_[1 + xenos::kMaxColorRenderTargets];
@@ -2111,14 +2154,22 @@ index 4d85a2b..4143a4f 100644
   private:
    memory::Memory& memory_;
 diff --git a/include/rex/graphics/util/draw.h b/include/rex/graphics/util/draw.h
-index 3da182d..8229763 100644
+index 3da182d..1cff55a 100644
 --- a/include/rex/graphics/util/draw.h
 +++ b/include/rex/graphics/util/draw.h
-@@ -581,9 +581,21 @@ struct ResolveInfo {
+@@ -581,9 +581,29 @@ struct ResolveInfo {
  // color render target formats are properly emulated as -32...32, true if
  // emulated as snorm, with range limited to -1...1, but with correct blending
  // within that range.
-+// Collapsed predicated tiling (CommandProcessor::IssueNativeTilingDraw): while
++// Whether a draw writes every color target it uses opaquely (no blending,
++// full write mask, no alpha test / alpha to coverage / pixel kill / depth
++// output, no culling, full sample mask), for transfer elision in the render
++// target cache (RenderTargetCache::SetDrawWritesColorOpaquely). Shared by the
++// host backends.
++bool DrawWritesColorOpaquely(const RegisterFile& regs, const Shader* pixel_shader,
++                             uint32_t normalized_color_mask);
++
++// Collapsed predicated tiling (CommandProcessor::IssueDrawWithOverrides): while
 +// active, resolve rectangles ending at the first tile's right / bottom edge are
 +// widened to the edge of all tiles, and resolves take their source from the
 +// full-size render target of the source surface.
@@ -2137,6 +2188,50 @@ index 3da182d..8229763 100644
 +                    uint32_t doax2_max_height = UINT32_MAX);
  
  }  // namespace rex::graphics::draw_util
+diff --git a/include/rex/graphics/util/draw_extent_estimator.h b/include/rex/graphics/util/draw_extent_estimator.h
+index e5e4908..90bc3f9 100644
+--- a/include/rex/graphics/util/draw_extent_estimator.h
++++ b/include/rex/graphics/util/draw_extent_estimator.h
+@@ -31,6 +31,14 @@ class DrawExtentEstimator {
+   uint32_t EstimateVertexMaxY(const Shader& vertex_shader);
+   uint32_t EstimateMaxY(bool try_to_estimate_vertex_max_y, const Shader& vertex_shader);
+ 
++  // For a draw of one axis-aligned rectangle (a rectangle list primitive, a
++  // quad, or two triangles of a triangle strip / fan / list), runs the vertex
++  // shader on the CPU and returns the pixels whose centers it covers, in render
++  // target coordinates (window offset applied), before scissoring; false if the
++  // draw is anything else.
++  bool EstimateVertexRectangle(const Shader& vertex_shader, int32_t& left, int32_t& top,
++                               int32_t& right, int32_t& bottom);
++
+  private:
+   class PositionYExportSink : public ShaderInterpreter::ExportSink {
+    public:
+@@ -38,18 +46,24 @@ class DrawExtentEstimator {
+                 uint32_t value_mask) override;
+ 
+     void Reset() {
++      position_x_.reset();
++      position_z_.reset();
+       position_y_.reset();
+       position_w_.reset();
+       point_size_.reset();
+       vertex_kill_.reset();
+     }
+ 
++    const std::optional<float>& position_x() const { return position_x_; }
++    const std::optional<float>& position_z() const { return position_z_; }
+     const std::optional<float>& position_y() const { return position_y_; }
+     const std::optional<float>& position_w() const { return position_w_; }
+     const std::optional<float>& point_size() const { return point_size_; }
+     const std::optional<uint32_t>& vertex_kill() const { return vertex_kill_; }
+ 
+    private:
++    std::optional<float> position_x_;
++    std::optional<float> position_z_;
+     std::optional<float> position_y_;
+     std::optional<float> position_w_;
+     std::optional<float> point_size_;
 diff --git a/include/rex/kernel/xam/apps/xmp_app.h b/include/rex/kernel/xam/apps/xmp_app.h
 index d939d62..6586268 100644
 --- a/include/rex/kernel/xam/apps/xmp_app.h
@@ -2906,7 +3001,7 @@ index 225c7d9..4415c41 100644
  }  // namespace detail
  
 diff --git a/src/graphics/command_processor.cpp b/src/graphics/command_processor.cpp
-index a744375..3671a15 100644
+index a744375..9cbabd9 100644
 --- a/src/graphics/command_processor.cpp
 +++ b/src/graphics/command_processor.cpp
 @@ -10,6 +10,8 @@
@@ -3000,7 +3095,7 @@ index a744375..3671a15 100644
      if (!any_pass || opcode == PM4_XE_SWAP) {
        reader->AdvanceRead(count * sizeof(uint32_t));
        return true;
-@@ -904,12 +946,307 @@ bool CommandProcessor::ExecutePacketType3_ME_INIT(memory::RingBuffer* reader, ui
+@@ -904,12 +946,358 @@ bool CommandProcessor::ExecutePacketType3_ME_INIT(memory::RingBuffer* reader, ui
  
  bool CommandProcessor::ExecutePacketType3_NOP(memory::RingBuffer* reader, uint32_t packet,
                                                uint32_t count) {
@@ -3029,10 +3124,17 @@ index a744375..3671a15 100644
 +    if (words[0] == 5) {
 +      native_in_clear_ = true;
 +      draw_util::ResolveInfo clear_info;
++      bool keep_stencil = false;
 +      native_clear_skipping_ = REXCVAR_GET(gpu_native_clears) && !native_tiling_.active &&
-+                               BuildNativeClear(words + 1, count - 1, clear_info) &&
-+                               IssueNativeClear(clear_info);
++                               BuildNativeClear(words + 1, count - 1, clear_info, keep_stencil) &&
++                               IssueNativeClear(clear_info, keep_stencil);
 +      native_clears_ += native_clear_skipping_;
++      if (native_clear_skipping_) {
++        last_native_clear_ = clear_info;
++        last_native_clear_keep_stencil_ = keep_stencil;
++        last_native_clear_valid_ = true;
++        draws_since_native_clear_ = 0;
++      }
 +    } else if (words[0] == 6) {
 +      native_in_clear_ = false;
 +      native_clear_skipping_ = false;
@@ -3096,6 +3198,9 @@ index a744375..3671a15 100644
 +      tiling.bins = (uint64_t(1) << (2 * tiles)) - 1;
 +      tiling.collapse = tiling.union_right <= xenos::kTexture2DCubeMaxWidthHeight &&
 +                        tiling.union_bottom <= xenos::kTexture2DCubeMaxWidthHeight;
++      if (tiling.collapse) {
++        ClearCollapsedTilingSurfaces();
++      }
 +      return;
 +    }
 +    case 4:  // EndTiling (before its per-tile resolves).
@@ -3121,7 +3226,7 @@ index a744375..3671a15 100644
 +// resolve of the host render targets (no ownership transfers into them, no
 +// EDRAM model drawing); its rectangle draws are skipped until kind 6.
 +bool CommandProcessor::BuildNativeClear(const uint32_t* values, uint32_t count,
-+                                        draw_util::ResolveInfo& info) const {
++                                        draw_util::ResolveInfo& info, bool& keep_stencil) const {
 +  if (count < 18) {
 +    return false;
 +  }
@@ -3144,19 +3249,23 @@ index a744375..3671a15 100644
 +  const uint32_t* rt0 = values + 11;
 +  const uint32_t* ds = values + 14;
 +  const bool clear_color = (flags & 0xF) && rt0[0];
-+  const bool clear_depth_flags = (flags & 0x30) && ds[0];
-+  // Depth and stencil are one host clear: both or neither.
-+  if (clear_depth_flags && (flags & 0x30) != 0x30) {
++  // Depth with or without stencil (a stencil-only clear is left to the draws).
++  const bool clear_depth = (flags & 0x10) && ds[0];
++  if ((flags & 0x20) && ds[0] && !clear_depth) {
 +    return false;
 +  }
-+  const bool clear_depth = clear_depth_flags;
++  keep_stencil = clear_depth && !(flags & 0x20);
 +  if (!clear_color && !clear_depth) {
++    return false;
++  }
++  // The cleared area: from the origin, to the surface's edge or a multiple of
++  // the 8-pixel resolve granularity (the native clear's rectangle).
++  if (rect_x1 || rect_y1 || !rect_x2 || !rect_y2) {
 +    return false;
 +  }
 +  auto covers = [&](const uint32_t* surface) {
 +    const uint32_t width = (surface[2] >> 18) + 1, height = ((surface[2] >> 3) & 0x7FFF) + 1;
-+    return !rect_x1 && !rect_y1 && rect_x2 >= width && rect_y2 >= height &&
-+           int32_t(rect_x1) >= 0 && int32_t(rect_y1) >= 0;
++    return (rect_x2 >= width || !(rect_x2 & 7)) && (rect_y2 >= height || !(rect_y2 & 7));
 +  };
 +  const int32_t filter = REXCVAR_GET(gpu_native_clears_filter);
 +  if (!(filter & (clear_color ? (clear_depth ? 4 : 1) : 2))) {
@@ -3182,8 +3291,8 @@ index a744375..3671a15 100644
 +  uint32_t width = 0, height = 0;
 +  for (const uint32_t* cleared : {clear_color ? rt0 : nullptr, clear_depth ? ds : nullptr}) {
 +    if (cleared) {
-+      width = std::max(width, (cleared[2] >> 18) + 1);
-+      height = std::max(height, ((cleared[2] >> 3) & 0x7FFF) + 1);
++      width = std::max(width, std::min(rect_x2, (cleared[2] >> 18) + 1));
++      height = std::max(height, std::min(rect_y2, ((cleared[2] >> 3) & 0x7FFF) + 1));
 +    }
 +  }
 +  info = draw_util::ResolveInfo();
@@ -3230,7 +3339,44 @@ index a744375..3671a15 100644
 +  return true;
 +}
 +
-+bool CommandProcessor::IssueNativeClear(draw_util::ResolveInfo& info) { return false; }
++// The game clears the surfaces of a tiled section (one tile in size) just
++// before BeginTiling; the collapsed pass then draws to full-size render
++// targets, which would get the cleared values by ownership transfers. Repeat
++// the clear at the full size instead (if at most one draw - D3D's tiny
++// point draw - came in between).
++void CommandProcessor::ClearCollapsedTilingSurfaces() {
++  if (!last_native_clear_valid_ || draws_since_native_clear_ > 1) {
++    return;
++  }
++  last_native_clear_valid_ = false;
++  const NativeTiling& tiling = native_tiling_;
++  draw_util::ResolveInfo info = last_native_clear_;
++  draw_util::ResolveEdramInfo& edram =
++      info.IsClearingDepth() ? info.depth_edram_info : info.color_edram_info;
++  const uint32_t samples_x_log2 = uint32_t(edram.msaa_samples >= xenos::MsaaSamples::k4X);
++  auto pitch_tiles = [&](uint32_t pixels) {
++    return ((pixels << samples_x_log2) + (xenos::kEdramTileWidthSamples - 1)) /
++           xenos::kEdramTileWidthSamples;
++  };
++  if (edram.pitch_tiles != pitch_tiles(tiling.tile_right) ||
++      info.coordinate_info.width_div_8 * 8 < tiling.tile_right) {
++    return;
++  }
++  const uint32_t pitch = pitch_tiles(tiling.union_right);
++  if (info.IsClearingDepth()) {
++    info.depth_edram_info.pitch_tiles = pitch;
++  }
++  if (info.IsClearingColor()) {
++    info.color_edram_info.pitch_tiles = pitch << info.color_edram_info.format_is_64bpp;
++  }
++  info.coordinate_info.width_div_8 = (tiling.union_right + 7) >> 3;
++  info.height_div_8 = std::max(info.height_div_8, (tiling.union_bottom + 7) >> 3);
++  native_clears_ += IssueNativeClear(info, last_native_clear_keep_stencil_);
++}
++
++bool CommandProcessor::IssueNativeClear(draw_util::ResolveInfo& info, bool keep_stencil) {
++  return false;
++}
 +
 +bool CommandProcessor::DrawNeedsOverrides() const {
 +  return NativeTilingCollapsing() ||
@@ -3308,7 +3454,7 @@ index a744375..3671a15 100644
  bool CommandProcessor::ExecutePacketType3_INTERRUPT(memory::RingBuffer* reader, uint32_t packet,
                                                      uint32_t count) {
    SCOPE_profile_cpu_f("gpu");
-@@ -960,6 +1297,26 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
+@@ -960,6 +1348,26 @@ bool CommandProcessor::ExecutePacketType3_XE_SWAP(memory::RingBuffer* reader, ui
  
    IssueSwap(frontbuffer_ptr, frontbuffer_width, frontbuffer_height);
  
@@ -3335,7 +3481,7 @@ index a744375..3671a15 100644
    ++counter_;
    return true;
  }
-@@ -977,6 +1334,13 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
+@@ -977,6 +1385,13 @@ bool CommandProcessor::ExecutePacketType3_INDIRECT_BUFFER(memory::RingBuffer* re
  
  bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reader, uint32_t packet,
                                                         uint32_t count) {
@@ -3349,7 +3495,7 @@ index a744375..3671a15 100644
    SCOPE_profile_cpu_f("gpu");
  
    // wait until a register or memory location is a specific value
-@@ -988,9 +1352,13 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -988,9 +1403,13 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
    uint32_t wait = reader->ReadAndSwap<uint32_t>();
  
    bool is_memory = (wait_info & 0x10) != 0;
@@ -3363,7 +3509,7 @@ index a744375..3671a15 100644
      uint32_t value = 0;
      if (is_memory) {
        value =
-@@ -1003,6 +1371,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1003,6 +1422,7 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
          value = ReadRegisterValue(poll_reg_addr);
        }
      }
@@ -3371,7 +3517,7 @@ index a744375..3671a15 100644
      switch (wait_info & 0x7) {
        case 0x0:  // Never.
          matched = false;
-@@ -1052,6 +1421,27 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
+@@ -1052,6 +1472,27 @@ bool CommandProcessor::ExecutePacketType3_WAIT_REG_MEM(memory::RingBuffer* reade
      }
    } while (!matched);
  
@@ -3399,7 +3545,7 @@ index a744375..3671a15 100644
    return true;
  }
  
-@@ -1378,8 +1768,31 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
+@@ -1378,8 +1819,32 @@ bool CommandProcessor::ExecutePacketType3Draw(memory::RingBuffer* reader, uint32
  
        bool major_mode_explicit =
            xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, vgt_draw_initiator.prim_type);
@@ -3413,6 +3559,7 @@ index a744375..3671a15 100644
 +          LogNativeState("first draw");
 +        }
 +        ++native_marker_draws_;
++        ++draws_since_native_clear_;
 +      }
 +      if (native_clear_skipping_) {
 +        // Drawing a clear done natively (IssueNativeClear).
@@ -3434,7 +3581,7 @@ index a744375..3671a15 100644
          auto vgt_output_path_cntl = register_file_->Get<reg::VGT_OUTPUT_PATH_CNTL>();
          auto vgt_hos_cntl = register_file_->Get<reg::VGT_HOS_CNTL>();
 diff --git a/src/graphics/d3d12/command_processor.cpp b/src/graphics/d3d12/command_processor.cpp
-index 19874a5..cb74d7f 100644
+index 19874a5..415ae2f 100644
 --- a/src/graphics/d3d12/command_processor.cpp
 +++ b/src/graphics/d3d12/command_processor.cpp
 @@ -10,8 +10,14 @@
@@ -3542,7 +3689,7 @@ index 19874a5..cb74d7f 100644
  
  REXCVAR_DEFINE_BOOL(d3d12_bindless, true, "GPU/D3D12", "Use bindless resources where available")
      .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-@@ -47,8 +129,96 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
+@@ -47,8 +129,99 @@ REXCVAR_DEFINE_BOOL(d3d12_submit_on_primary_buffer_end, true, "GPU/D3D12",
                      "Submit command list when PM4 primary buffer ends")
      .lifecycle(rex::cvar::Lifecycle::kHotReload);
  
@@ -3553,6 +3700,9 @@ index 19874a5..cb74d7f 100644
 +                     "DOAX2: end the open GPU submission every N guest draws (0 = only at the "
 +                     "usual points) so the GPU starts on a frame while the CPU still records it "
 +                     "and each kernel submission stays small");
++REXCVAR_DEFINE_BOOL(gpu_native_transfer_elision, false, "GPU",
++                    "Native renderer: no render target ownership transfers into the area a "
++                    "rectangle draw (full-screen pass) overwrites opaquely");
 +REXCVAR_DEFINE_BOOL(d3d12_doax2_gpu_sections, false, "GPU/D3D12",
 +                    "DOAX2: GPU timestamps around render target updates, texture requests and "
 +                    "resolves (adds GPU cost itself; diagnostics only)");
@@ -3639,7 +3789,7 @@ index 19874a5..cb74d7f 100644
  // Generated with `xb buildshaders`.
  namespace shaders {
  #include "../shaders/bytecode/d3d12_5_1/apply_gamma_pwl_cs.h"
-@@ -253,9 +423,37 @@ void D3D12CommandProcessor::PushUAVBarrier(ID3D12Resource* resource) {
+@@ -253,9 +426,37 @@ void D3D12CommandProcessor::PushUAVBarrier(ID3D12Resource* resource) {
    barriers_.push_back(barrier);
  }
  
@@ -3677,7 +3827,7 @@ index 19874a5..cb74d7f 100644
      deferred_command_list_.D3DResourceBarrier(barrier_count, barriers_.data());
      barriers_.clear();
    }
-@@ -543,6 +741,29 @@ uint32_t D3D12CommandProcessor::RequestPersistentViewBindlessDescriptor() {
+@@ -543,6 +744,29 @@ uint32_t D3D12CommandProcessor::RequestPersistentViewBindlessDescriptor() {
    return view_bindless_heap_allocated_++;
  }
  
@@ -3707,7 +3857,7 @@ index 19874a5..cb74d7f 100644
  void D3D12CommandProcessor::ReleaseViewBindlessDescriptorImmediately(uint32_t descriptor_index) {
    assert_true(bindless_resources_used_);
    view_bindless_heap_free_.push_back(descriptor_index);
-@@ -1499,6 +1720,20 @@ bool D3D12CommandProcessor::SetupContext() {
+@@ -1499,6 +1723,20 @@ bool D3D12CommandProcessor::SetupContext() {
          provider.OffsetViewDescriptor(view_bindless_heap_cpu_start_,
                                        uint32_t(SystemBindlessView::kNullRawUAV)),
          nullptr, 0);
@@ -3728,7 +3878,7 @@ index 19874a5..cb74d7f 100644
      // kNullTexture2DArray.
      D3D12_SHADER_RESOURCE_VIEW_DESC null_srv_desc;
      null_srv_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-@@ -1682,6 +1917,21 @@ void D3D12CommandProcessor::ShutdownContext() {
+@@ -1682,6 +1920,21 @@ void D3D12CommandProcessor::ShutdownContext() {
    fxaa_source_texture_submission_ = 0;
    fxaa_source_texture_.Reset();
  
@@ -3750,7 +3900,7 @@ index 19874a5..cb74d7f 100644
    fxaa_extreme_pipeline_.Reset();
    fxaa_pipeline_.Reset();
    fxaa_root_signature_.Reset();
-@@ -1891,9 +2141,417 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
+@@ -1891,9 +2144,417 @@ void D3D12CommandProcessor::OnGammaRampPWLValueWritten() {
    gamma_ramp_pwl_up_to_date_ = false;
  }
  
@@ -4168,7 +4318,7 @@ index 19874a5..cb74d7f 100644
    vertex_buffers_in_sync_[0] = 0;
    vertex_buffers_in_sync_[1] = 0;
  
-@@ -1911,6 +2569,46 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -1911,6 +2572,46 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
      return;
    }
  
@@ -4215,7 +4365,7 @@ index 19874a5..cb74d7f 100644
    // Obtain the actual swap source texture size (resolution-scaled if it's a
    // resolve destination, or not otherwise).
    D3D12_SHADER_RESOURCE_VIEW_DESC swap_texture_srv_desc;
-@@ -1965,6 +2663,33 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -1965,6 +2666,33 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
                                                 : (frontbuffer_height ? frontbuffer_height
                                                                       : frontbuffer_height_unscaled);
    }
@@ -4249,7 +4399,7 @@ index 19874a5..cb74d7f 100644
    bool swap_source_scaled = frontbuffer_width_unscaled && frontbuffer_height_unscaled &&
                              (source_width_scaled != frontbuffer_width_unscaled ||
                               source_height_scaled != frontbuffer_height_unscaled);
-@@ -1985,17 +2710,39 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -1985,17 +2713,39 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
    uint32_t display_width = std::max(uint32_t(1), uint32_t(video_mode.display_width));
    uint32_t display_height = std::max(uint32_t(1), uint32_t(video_mode.display_height));
  
@@ -4294,7 +4444,7 @@ index 19874a5..cb74d7f 100644
            // Make sure the texture of the correct size is available for FXAA.
            if (fxaa_source_texture_) {
              D3D12_RESOURCE_DESC fxaa_source_texture_desc = fxaa_source_texture_->GetDesc();
-@@ -2110,12 +2857,12 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2110,12 +2860,12 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
              static_cast<ui::d3d12::D3D12Presenter::D3D12GuestOutputRefreshContext&>(context)
                  .resource_uav_capable();
  
@@ -4309,7 +4459,7 @@ index 19874a5..cb74d7f 100644
          D3D12_RESOURCE_STATES apply_gamma_dest_initial_state =
              use_fxaa ? D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
                       : ui::d3d12::D3D12Presenter::kGuestOutputInternalState;
-@@ -2134,7 +2881,11 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2134,7 +2884,11 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          device->CreateUnorderedAccessView(apply_gamma_dest, nullptr, &apply_gamma_dest_uav_desc,
                                            apply_gamma_descriptors[0].first);
  
@@ -4322,7 +4472,7 @@ index 19874a5..cb74d7f 100644
                                           apply_gamma_descriptors[1].first);
  
          PushTransitionBarrier(gamma_ramp_buffer_.Get(), gamma_ramp_buffer_state_,
-@@ -2167,6 +2918,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2167,6 +2921,13 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
          uint32_t group_count_x = (guest_output_width + 15) / 16;
          uint32_t group_count_y = (guest_output_height + 7) / 8;
          deferred_command_list_.D3DDispatch(group_count_x, group_count_y, 1);
@@ -4336,7 +4486,7 @@ index 19874a5..cb74d7f 100644
  
          // Apply FXAA.
          if (use_fxaa) {
-@@ -2224,7 +2982,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2224,7 +2985,7 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
              fxaa_source_srv_desc.Texture2D.MipLevels = 1;
              fxaa_source_srv_desc.Texture2D.PlaneSlice = 0;
              fxaa_source_srv_desc.Texture2D.ResourceMinLODClamp = 0.0f;
@@ -4345,7 +4495,7 @@ index 19874a5..cb74d7f 100644
                                               fxaa_descriptors[1].first);
              deferred_command_list_.D3DSetComputeRootDescriptorTable(
                  UINT(FxaaRootParameter::kSource), fxaa_descriptors[1].second);
-@@ -2243,17 +3001,336 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
+@@ -2243,17 +3004,336 @@ void D3D12CommandProcessor::IssueSwap(uint32_t frontbuffer_ptr, uint32_t frontbu
                                  apply_gamma_dest_initial_state);
          }
  
@@ -4685,7 +4835,7 @@ index 19874a5..cb74d7f 100644
  }
  
  void D3D12CommandProcessor::OnPrimaryBufferEnd() {
-@@ -2271,6 +3348,27 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_
+@@ -2271,6 +3351,27 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type, uint32_
  bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint32_t index_count,
                                        IndexBufferInfo* index_buffer_info,
                                        bool major_mode_explicit) {
@@ -4713,7 +4863,7 @@ index 19874a5..cb74d7f 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -2295,6 +3393,79 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2295,6 +3396,79 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
    bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
  
@@ -4793,7 +4943,7 @@ index 19874a5..cb74d7f 100644
    // Pixel shader analysis.
    bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
    bool is_rasterization_done = draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
-@@ -2333,6 +3504,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2333,6 +3507,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
  
    // Process primitives.
    PrimitiveProcessor::ProcessingResult primitive_processing_result;
@@ -4801,7 +4951,7 @@ index 19874a5..cb74d7f 100644
    if (!primitive_processor_->Process(primitive_processing_result)) {
      return false;
    }
-@@ -2364,10 +3536,31 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2364,10 +3539,41 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    uint32_t normalized_color_mask =
        pixel_shader ? draw_util::GetNormalizedColorMask(regs, pixel_shader->writes_color_targets())
                     : 0;
@@ -4825,6 +4975,16 @@ index 19874a5..cb74d7f 100644
 +  };
 +  doax2_stages.Mark(2);
 +  const int64_t doax2_rt_section = doax2_section_begin();
++  if (REXCVAR_GET(gpu_native_transfer_elision)) {
++    const bool opaque = draw_util::DrawWritesColorOpaquely(regs, pixel_shader, normalized_color_mask);
++    render_target_cache_->SetDrawWritesColorOpaquely(opaque);
++    if (g_doax2_rt_trace_active)
++      REXGPU_INFO("DOAX2 RT trace: draw {} opaque={} kill={} colorcontrol={:08X} blend0={:08X} mask={:X} "
++                  "aamask={:X} sc_mode={:08X} clip={:08X}", g_doax2_rt_trace_draw, opaque,
++                  pixel_shader && pixel_shader->kills_pixels(), regs[XE_GPU_REG_RB_COLORCONTROL],
++                  regs[XE_GPU_REG_RB_BLENDCONTROL0], normalized_color_mask, regs[XE_GPU_REG_PA_SC_AA_MASK],
++                  regs[XE_GPU_REG_PA_SU_SC_MODE_CNTL], regs[XE_GPU_REG_PA_CL_CLIP_CNTL]);
++  }
    if (!render_target_cache_->Update(is_rasterization_done, normalized_depth_control,
                                      normalized_color_mask, *vertex_shader)) {
      return false;
@@ -4833,7 +4993,7 @@ index 19874a5..cb74d7f 100644
  
    // Create the pipeline (for this, need the actually used render target formats
    // from the render target cache), translating the shaders - doing this now to
-@@ -2380,18 +3573,23 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2380,18 +3586,23 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
                           pixel_shader->GetOrCreateTranslation(pixel_shader_modification.value))
                     : nullptr;
    uint32_t bound_depth_and_color_render_target_bits;
@@ -4859,7 +5019,7 @@ index 19874a5..cb74d7f 100644
    if (!pipeline_cache_->ConfigurePipeline(
            vertex_shader_translation, pixel_shader_translation, primitive_processing_result,
            normalized_depth_control, normalized_color_mask, bound_depth_and_color_render_target_bits,
-@@ -2407,7 +3605,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2407,7 +3618,10 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    uint32_t used_texture_mask =
        vertex_shader->GetUsedTextureMaskAfterTranslation() |
        (pixel_shader != nullptr ? pixel_shader->GetUsedTextureMaskAfterTranslation() : 0);
@@ -4870,7 +5030,7 @@ index 19874a5..cb74d7f 100644
  
    // Bind the pipeline after configuring it and doing everything that may bind
    // other pipelines.
-@@ -2434,6 +3635,72 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2434,6 +3648,72 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    viewport_key.pa_su_vtx_cntl = regs[XE_GPU_REG_PA_SU_VTX_CNTL];
    viewport_key.pa_sc_window_offset = regs[XE_GPU_REG_PA_SC_WINDOW_OFFSET];
    viewport_key.normalized_depth_control = normalized_depth_control.value;
@@ -4943,7 +5103,7 @@ index 19874a5..cb74d7f 100644
    std::memcpy(viewport_key.vport_regs, &regs[XE_GPU_REG_PA_CL_VPORT_XSCALE],
                sizeof(viewport_key.vport_regs));
    viewport_key.flags = (uint32_t(convert_z_to_float24) << 0) |
-@@ -2444,7 +3711,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2444,7 +3724,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
      viewport_info = previous_viewport_info_;
    } else {
      draw_util::GetHostViewportInfo(regs, draw_resolution_scale_x, draw_resolution_scale_y, true,
@@ -4952,7 +5112,7 @@ index 19874a5..cb74d7f 100644
                                     normalized_depth_control, convert_z_to_float24,
                                     host_render_targets_used, ps_writes_depth, viewport_info);
      previous_viewport_key_ = viewport_key;
-@@ -2452,18 +3719,144 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2452,18 +3732,144 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
      viewport_cache_valid_ = true;
    }
  
@@ -5104,7 +5264,7 @@ index 19874a5..cb74d7f 100644
    UpdateSystemConstantValues(memexport_used, primitive_polygonal,
                               primitive_processing_result.line_loop_closing_index,
                               primitive_processing_result.host_shader_index_endian, viewport_info,
-@@ -2473,8 +3866,16 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2473,8 +3879,16 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
    if (!UpdateBindings(vertex_shader, pixel_shader, root_signature, memexport_used)) {
      return false;
    }
@@ -5121,7 +5281,7 @@ index 19874a5..cb74d7f 100644
    // Ensure vertex buffers are resident.
    const Shader::ConstantRegisterMap& constant_map_vertex = vertex_shader->constant_register_map();
    for (uint32_t i = 0; i < rex::countof(constant_map_vertex.vertex_fetch_bitmap); ++i) {
-@@ -2614,6 +4015,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
+@@ -2614,6 +4028,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type, uint3
          return false;
      }
    }
@@ -5129,7 +5289,7 @@ index 19874a5..cb74d7f 100644
    SetPrimitiveTopology(primitive_topology);
    // Must not call anything that may change the primitive topology from now on!
  
-@@ -2870,7 +4272,104 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
+@@ -2870,7 +4285,104 @@ bool D3D12CommandProcessor::IssueDraw_MemexportReadbackFastPath(uint32_t total_s
    return true;
  }
  
@@ -5221,11 +5381,11 @@ index 19874a5..cb74d7f 100644
 +  return true;
 +}
 +
-+bool D3D12CommandProcessor::IssueNativeClear(draw_util::ResolveInfo& info) {
++bool D3D12CommandProcessor::IssueNativeClear(draw_util::ResolveInfo& info, bool keep_stencil) {
 +  if (!BeginSubmission(true)) {
 +    return false;
 +  }
-+  return render_target_cache_->NativeClear(info);
++  return render_target_cache_->NativeClear(info, keep_stencil);
 +}
 +
  bool D3D12CommandProcessor::IssueCopy() {
@@ -5234,7 +5394,7 @@ index 19874a5..cb74d7f 100644
  #if XE_GPU_FINE_GRAINED_DRAW_SCOPES
    SCOPE_profile_cpu_f("gpu");
  #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
-@@ -2878,12 +4377,38 @@ bool D3D12CommandProcessor::IssueCopy() {
+@@ -2878,12 +4390,38 @@ bool D3D12CommandProcessor::IssueCopy() {
      return false;
    }
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(d3d12_readback_resolve));
@@ -5275,7 +5435,7 @@ index 19874a5..cb74d7f 100644
  }
  
  bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
-@@ -3102,6 +4627,180 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -3102,6 +4640,180 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
    return true;
  }
  
@@ -5456,7 +5616,7 @@ index 19874a5..cb74d7f 100644
  void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
    if (await_submission >= submission_current_) {
      if (submission_open_) {
-@@ -3118,7 +4817,25 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3118,7 +4830,25 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
                      SUCCEEDED(queue_operations_since_submission_fence_->SetEventOnCompletion(
                          fence_value, fence_completion_event_)))) {
          PROFILE_CMD_BUFFER_STALL();
@@ -5483,7 +5643,7 @@ index 19874a5..cb74d7f 100644
          queue_operations_done_since_submission_signal_ = false;
        } else {
          REXGPU_ERROR(
-@@ -3133,12 +4850,46 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3133,12 +4863,46 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
  
    uint64_t submission_completed_before = submission_completed_;
    submission_completed_ = submission_fence_->GetCompletedValue();
@@ -5531,7 +5691,7 @@ index 19874a5..cb74d7f 100644
      }
    }
    if (submission_completed_ < await_submission) {
-@@ -3148,6 +4899,9 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3148,6 +4912,9 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
      // Not updated - no need to reclaim or download things.
      return;
    }
@@ -5541,13 +5701,12 @@ index 19874a5..cb74d7f 100644
  
    // Reclaim command allocators.
    while (command_allocator_submitted_first_) {
-@@ -3176,15 +4930,200 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3176,8 +4943,183 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
      view_bindless_one_use_descriptors_.pop_front();
    }
  
 -  // Delete transient resources marked for deletion.
 -  while (!resources_for_deletion_.empty()) {
--    if (resources_for_deletion_.front().first > submission_completed_) {
 +  for (uint32_t owned_bank_index = 0;
 +       owned_bank_index < owned_unit_in_flight_banks_.size();
 +       ++owned_bank_index) {
@@ -5725,10 +5884,10 @@ index 19874a5..cb74d7f 100644
 +
 +  // Delete transient resources marked for deletion.
 +  while (!resources_for_deletion_.empty()) {
-+    if (resources_for_deletion_.front().first > submission_completed_) {
+     if (resources_for_deletion_.front().first > submission_completed_) {
        break;
      }
-     resources_for_deletion_.front().second->Release();
+@@ -3185,6 +5127,16 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
      resources_for_deletion_.pop_front();
    }
  
@@ -5745,7 +5904,7 @@ index 19874a5..cb74d7f 100644
    shared_memory_->CompletedSubmissionUpdated();
  
    render_target_cache_->CompletedSubmissionUpdated();
-@@ -3192,6 +5131,56 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
+@@ -3192,6 +5144,56 @@ void D3D12CommandProcessor::CheckSubmissionFence(uint64_t await_submission) {
    primitive_processor_->CompletedSubmissionUpdated();
  
    texture_cache_->CompletedSubmissionUpdated(submission_completed_);
@@ -5802,7 +5961,7 @@ index 19874a5..cb74d7f 100644
  }
  
  void D3D12CommandProcessor::LogDeviceRemovalDiagnostics(ID3D12Device* device, HRESULT reason) {
-@@ -3371,7 +5360,60 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
+@@ -3371,7 +5373,60 @@ bool D3D12CommandProcessor::BeginSubmission(bool is_guest_command) {
    return true;
  }
  
@@ -5864,7 +6023,7 @@ index 19874a5..cb74d7f 100644
    const ui::d3d12::D3D12Provider& provider = GetD3D12Provider();
  
    // Make sure there is a command allocator to write commands to.
-@@ -3423,12 +5465,82 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+@@ -3423,12 +5478,82 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
      // happens between Xenia submissions.
      ID3D12CommandAllocator* command_allocator =
          command_allocator_writable_first_->command_allocator;
@@ -5951,7 +6110,7 @@ index 19874a5..cb74d7f 100644
      command_allocator_writable_first_->last_usage_submission = submission_current_;
      if (command_allocator_submitted_last_) {
        command_allocator_submitted_last_->next = command_allocator_writable_first_;
-@@ -3442,7 +5554,136 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
+@@ -3442,7 +5567,136 @@ bool D3D12CommandProcessor::EndSubmission(bool is_swap) {
        command_allocator_writable_last_ = nullptr;
      }
  
@@ -6089,7 +6248,7 @@ index 19874a5..cb74d7f 100644
  
      submission_open_ = false;
  
-@@ -3870,137 +6111,5861 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
+@@ -3870,137 +6124,5861 @@ void D3D12CommandProcessor::UpdateSystemConstantValues(
      system_constants_.edram_32bpp_tile_pitch_dwords_scaled = edram_32bpp_tile_pitch_dwords_scaled;
    }
  
@@ -12066,7 +12225,7 @@ index 19874a5..cb74d7f 100644
  }
  
  bool D3D12CommandProcessor::UpdateBindings(const D3D12Shader* vertex_shader,
-@@ -4938,13 +12903,44 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
+@@ -4938,13 +12916,44 @@ bool D3D12CommandProcessor::EndGuestOcclusionQuery(
    deferred_command_list_.D3DResolveQueryData(
        occlusion_query_heap_.Get(), D3D12_QUERY_TYPE_OCCLUSION, host_index, 1,
        occlusion_query_readback_.Get(), sizeof(uint64_t) * host_index);
@@ -12494,7 +12653,7 @@ index 8e6b854..4eab8a3 100644
        REXGPU_ERROR("Failed to create graphics pipeline with VS {:016X}, PS {:016X}",
                     runtime_description.vertex_shader->shader().ucode_data_hash(),
 diff --git a/src/graphics/d3d12/render_target_cache.cpp b/src/graphics/d3d12/render_target_cache.cpp
-index dd321a5..385c67b 100644
+index dd321a5..9a1d2a2 100644
 --- a/src/graphics/d3d12/render_target_cache.cpp
 +++ b/src/graphics/d3d12/render_target_cache.cpp
 @@ -38,6 +38,19 @@
@@ -12941,7 +13100,7 @@ index dd321a5..385c67b 100644
  bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
                                      reg::RB_DEPTHCONTROL normalized_depth_control,
                                      uint32_t normalized_color_mask, const Shader& vertex_shader) {
-@@ -1063,12 +1437,97 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
+@@ -1063,12 +1437,102 @@ bool D3D12RenderTargetCache::Update(bool is_rasterization_done,
                                   normalized_color_mask, vertex_shader)) {
      return false;
    }
@@ -13021,6 +13180,9 @@ index dd321a5..385c67b 100644
 +          REXGPU_INFO("DOAX2 RT trace: draw {} binds{}", g_doax2_rt_trace_draw, bound);
 +        }
 +        const std::vector<Transfer>* transfers = last_update_transfers();
++        if (const Transfer::Rectangle* cutout = last_update_transfer_cutout())
++          REXGPU_INFO("DOAX2 RT trace: draw {} transfer cutout {}x{}+{}+{}", g_doax2_rt_trace_draw,
++                      cutout->width_pixels, cutout->height_pixels, cutout->x_pixels, cutout->y_pixels);
 +        for (uint32_t i = 0; i < 1 + xenos::kMaxColorRenderTargets; ++i) {
 +          if (!depth_and_color_render_targets[i]) continue;
 +          for (const Transfer& transfer : transfers[i])
@@ -13031,20 +13193,22 @@ index dd321a5..385c67b 100644
 +                        depth_and_color_render_targets[i]->key().GetDebugName());
 +        }
 +      }
++      // The cutout (transfer elision) only exists when no depth is used.
        PerformTransfersAndResolveClears(1 + xenos::kMaxColorRenderTargets,
 -                                       depth_and_color_render_targets, last_update_transfers());
 +                                       depth_and_color_render_targets,
 +                                       REXCVAR_GET(d3d12_doax2_skip_draw_transfers)
 +                                           ? doax2_no_transfers
-+                                           : last_update_transfers());
++                                           : last_update_transfers(),
++                                       nullptr, last_update_transfer_cutout());
        SetCommandListRenderTargets(depth_and_color_render_targets);
      } break;
      case Path::kPixelShaderInterlock: {
-@@ -1159,6 +1618,37 @@ void D3D12RenderTargetCache::WriteEdramUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTO
+@@ -1159,6 +1623,39 @@ void D3D12RenderTargetCache::WriteEdramUintPow2UAVDescriptor(D3D12_CPU_DESCRIPTO
                                  D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
  }
  
-+bool D3D12RenderTargetCache::NativeClear(draw_util::ResolveInfo& info) {
++bool D3D12RenderTargetCache::NativeClear(draw_util::ResolveInfo& info, bool keep_stencil) {
 +  if (GetPath() != Path::kHostRenderTargets) {
 +    return false;
 +  }
@@ -13069,8 +13233,10 @@ index dd321a5..385c67b 100644
 +                  clear_rectangle.y_pixels, clear_values[i], clear_transfers_[i].size());
 +    }
 +  }
++  resolve_clear_keep_stencil_ = keep_stencil;
 +  PerformTransfersAndResolveClears(2, clear_render_targets, clear_transfers_, clear_values,
 +                                   &clear_rectangle);
++  resolve_clear_keep_stencil_ = false;
 +  return (!info.IsClearingDepth() || clear_render_targets[0]) &&
 +         (!info.IsClearingColor() || clear_render_targets[1]);
 +}
@@ -13078,7 +13244,7 @@ index dd321a5..385c67b 100644
  bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMemory& shared_memory,
                                       D3D12TextureCache& texture_cache,
                                       uint32_t& written_address_out, uint32_t& written_length_out) {
-@@ -1167,14 +1657,160 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1167,14 +1664,160 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
  
    bool draw_resolution_scaled = IsDrawResolutionScaled();
  
@@ -13241,7 +13407,7 @@ index dd321a5..385c67b 100644
    // Nothing to copy/clear.
    if (!resolve_info.coordinate_info.width_div_8 || !resolve_info.height_div_8) {
      return true;
-@@ -1194,11 +1830,70 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1194,11 +1837,70 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
      if (copy_shader != draw_util::ResolveCopyShaderIndex::kUnknown) {
        const draw_util::ResolveCopyShaderInfo& copy_shader_info =
            draw_util::resolve_copy_shader_info[size_t(copy_shader)];
@@ -13314,7 +13480,7 @@ index dd321a5..385c67b 100644
            if (direct_resolved) {
              ++direct_resolve_success_count_;
            } else {
-@@ -1208,16 +1903,115 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1208,16 +1910,115 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
          if (!direct_resolved) {
            // Dump the current contents of the render targets owning the affected
            // range to edram_buffer_.
@@ -13436,7 +13602,7 @@ index dd321a5..385c67b 100644
        }
  
        // Make sure there is memory to write to.
-@@ -1238,6 +2032,58 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1238,6 +2039,58 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
                                                           resolve_info.copy_dest_extent_length);
        }
        if (copy_dest_committed) {
@@ -13495,7 +13661,7 @@ index dd321a5..385c67b 100644
          // Write the descriptors and transition the resources.
          // Full shared memory without resolution scaling, range of the scaled
          // resolve buffer with scaling because only at least 128 * 2^20 R32
-@@ -1298,7 +2144,19 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1298,7 +2151,19 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
              command_list.D3DSetComputeRoot32BitConstants(
                  0, sizeof(copy_shader_constants) / sizeof(uint32_t), &copy_shader_constants, 0);
            }
@@ -13516,7 +13682,7 @@ index dd321a5..385c67b 100644
            command_processor_.SubmitBarriers();
            command_list.D3DDispatch(copy_group_count_x, copy_group_count_y, 1);
  
-@@ -1316,6 +2174,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1316,6 +2181,7 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            written_length_out = resolve_info.copy_dest_extent_length;
            copied = true;
          }
@@ -13524,7 +13690,7 @@ index dd321a5..385c67b 100644
        } else {
          REXGPU_ERROR(
              "D3D12RenderTargetCache: Failed to obtain the resolve destination "
-@@ -1330,6 +2189,20 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1330,6 +2196,20 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
    bool cleared = false;
    bool clear_depth = resolve_info.IsClearingDepth();
    bool clear_color = resolve_info.IsClearingColor();
@@ -13545,7 +13711,7 @@ index dd321a5..385c67b 100644
    if (clear_depth || clear_color) {
      switch (GetPath()) {
        case Path::kHostRenderTargets: {
-@@ -1344,8 +2217,28 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1344,8 +2224,28 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
            clear_values[0] = resolve_info.rb_depth_clear;
            clear_values[1] =
                resolve_info.rb_color_clear | (uint64_t(resolve_info.rb_color_clear_lo) << 32);
@@ -13574,7 +13740,7 @@ index dd321a5..385c67b 100644
          }
          cleared = true;
        } break;
-@@ -1414,6 +2307,12 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
+@@ -1414,6 +2314,12 @@ bool D3D12RenderTargetCache::Resolve(const memory::Memory& memory, D3D12SharedMe
      cleared = true;
    }
  
@@ -13587,7 +13753,7 @@ index dd321a5..385c67b 100644
    return copied && cleared;
  }
  
-@@ -3698,7 +4597,12 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
+@@ -3698,7 +4604,12 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
      pipeline_desc.DepthStencilState.FrontFace.StencilFailOp = D3D12_STENCIL_OP_KEEP;
      pipeline_desc.DepthStencilState.FrontFace.StencilDepthFailOp = D3D12_STENCIL_OP_KEEP;
      pipeline_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
@@ -13601,7 +13767,7 @@ index dd321a5..385c67b 100644
      pipeline_desc.DepthStencilState.BackFace = pipeline_desc.DepthStencilState.FrontFace;
      pipeline_desc.DSVFormat = GetDepthDSVDXGIFormat(dest_depth_format);
      // Even if creation fails, still store the null pointers not to try to
-@@ -3743,7 +4647,12 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
+@@ -3743,7 +4654,12 @@ ID3D12PipelineState* const* D3D12RenderTargetCache::GetOrCreateTransferPipelines
          pipeline_desc.DepthStencilState.FrontFace.StencilPassOp = D3D12_STENCIL_OP_REPLACE;
          // Using ALWAYS, not NOT_EQUAL, so depth writing is unaffected by
          // stencil being different.
@@ -13615,7 +13781,7 @@ index dd321a5..385c67b 100644
          pipeline_desc.DepthStencilState.BackFace = pipeline_desc.DepthStencilState.FrontFace;
        }
        pipeline_desc.DSVFormat = GetDepthDSVDXGIFormat(dest_depth_format);
-@@ -3806,6 +4715,17 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -3806,6 +4722,17 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
    DeferredCommandList& command_list = command_processor_.GetDeferredCommandList();
  
    bool resolve_clear_needed = render_target_resolve_clear_values && resolve_clear_rectangle;
@@ -13633,7 +13799,7 @@ index dd321a5..385c67b 100644
    D3D12_RECT clear_rect;
    if (resolve_clear_needed) {
      // Assuming the rectangle is already clamped by the setup function from the
-@@ -4072,9 +4992,12 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4072,9 +4999,12 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
    // Perform the transfers and clears.
  
    bool transfer_viewport_set = false;
@@ -13649,7 +13815,7 @@ index dd321a5..385c67b 100644
  
    TransferRootSignatureIndex last_transfer_root_signature_index =
        TransferRootSignatureIndex::kCount;
-@@ -4094,6 +5017,59 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+@@ -4094,6 +5024,59 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
      }
  
      const std::vector<Transfer>& current_transfers = render_target_transfers[i];
@@ -13709,7 +13875,18 @@ index dd321a5..385c67b 100644
      if (current_transfers.empty() && !resolve_clear_needed) {
        continue;
      }
-@@ -5200,6 +6176,17 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
+@@ -4572,7 +5555,9 @@ void D3D12RenderTargetCache::PerformTransfersAndResolveClears(
+             D3D12_RESOURCE_STATE_DEPTH_WRITE);
+         command_processor_.SubmitBarriers();
+         command_list.D3DClearDepthStencilView(dest_d3d12_rt.descriptor_draw().GetHandle(),
+-                                              D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
++                                              resolve_clear_keep_stencil_
++                                                  ? D3D12_CLEAR_FLAG_DEPTH
++                                                  : D3D12_CLEAR_FLAG_DEPTH | D3D12_CLEAR_FLAG_STENCIL,
+                                               depth_host_clear_value, UINT(clear_value) & 0xFF, 1,
+                                               &clear_rect);
+       } else {
+@@ -5200,6 +6185,17 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
    // r1.x = free
    a.OpIAdd(dxbc::Dest::R(0, 0b1000), dxbc::Src::R(0, dxbc::Src::kWWWW),
             -dxbc::Src::R(1, dxbc::Src::kXXXX));
@@ -13727,7 +13904,7 @@ index dd321a5..385c67b 100644
    // Get the source texture pitch in tiles to r1.x.
    // r0.x = X sample position within the tile
    // r0.y = Y sample position within the tile
-@@ -5215,8 +6202,9 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
+@@ -5215,8 +6211,9 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDumpPipeline(DumpPipelin
    // r0.z = sample offset in the EDRAM
    // r0.w = X tile index within the tile row in the source texture
    // r1.x = Y tile row index within the source texture
@@ -13739,7 +13916,7 @@ index dd321a5..385c67b 100644
    // Add the source texture tile X offset to the source texture sample X
    // coordinate.
    // r0.x = X sample position within the source texture
-@@ -5535,7 +6523,8 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDirectResolvePipeline(
+@@ -5535,7 +6532,8 @@ ID3D12PipelineState* D3D12RenderTargetCache::GetOrCreateDirectResolvePipeline(
  
  bool D3D12RenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInfo& resolve_info,
                                                      draw_util::ResolveCopyShaderIndex copy_shader,
@@ -13749,7 +13926,7 @@ index dd321a5..385c67b 100644
    ++direct_resolve_attempt_count_;
    (void)copy_shader;
    (void)draw_resolution_scaled;
-@@ -5577,11 +6566,13 @@ bool D3D12RenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInfo
+@@ -5577,11 +6575,13 @@ bool D3D12RenderTargetCache::TryResolveCopyDirectly(const draw_util::ResolveInfo
  
    // Dedicated direct resolve dispatches are staged behind the same preflight;
    // keep using the existing dump path until source-image direct shaders land.
@@ -13765,7 +13942,7 @@ index dd321a5..385c67b 100644
    assert_true(GetPath() == Path::kHostRenderTargets);
  
    GetResolveCopyRectanglesToDump(dump_base, dump_row_length_used, dump_rows, dump_pitch,
-@@ -5590,6 +6581,111 @@ bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump
+@@ -5590,6 +6590,111 @@ bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump
      return true;
    }
  
@@ -13877,7 +14054,7 @@ index dd321a5..385c67b 100644
    // Clear previously set temporary indices.
    for (const ResolveCopyDumpRectangle& rectangle : dump_rectangles_) {
      auto& d3d12_rt = *static_cast<D3D12RenderTarget*>(rectangle.render_target);
-@@ -5616,7 +6712,10 @@ bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump
+@@ -5616,7 +6721,10 @@ bool D3D12RenderTargetCache::DumpRenderTargets(uint32_t dump_base, uint32_t dump
      }
      if (d3d12_rt.temporary_srv_descriptor_index() == UINT32_MAX) {
        d3d12_rt.SetTemporarySRVDescriptorIndex(uint32_t(current_temporary_descriptors_cpu_.size()));
@@ -14787,18 +14964,58 @@ index 8f2fcb0..17bbfb8 100644
  
  void GraphicsSystem::ClearCaches() {
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
-index 953c5fd..997031b 100644
+index 953c5fd..6d5b313 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
 +++ b/src/graphics/pipeline/render_target/cache.cpp
-@@ -400,6 +400,7 @@ void RenderTargetCache::BeginFrame() {
+@@ -400,6 +400,10 @@ void RenderTargetCache::BeginFrame() {
  bool RenderTargetCache::Update(bool is_rasterization_done,
                                 reg::RB_DEPTHCONTROL normalized_depth_control,
                                 uint32_t normalized_color_mask, const Shader& vertex_shader) {
 +  last_update_claim_count_ = 0;
++  last_update_transfer_cutout_valid_ = false;
++  const bool draw_writes_color_opaquely = draw_writes_color_opaquely_;
++  draw_writes_color_opaquely_ = false;
    const RegisterFile& regs = register_file();
    bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
  
-@@ -686,6 +687,16 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -678,6 +682,36 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+     }
+   }
+ 
++  // Transfer elision: a draw of one rectangle that writes all its color
++  // targets opaquely (and uses no depth / stencil) replaces what is under it,
++  // so the previous contents of that area need not be transferred. The area
++  // is aligned inward to the 8-pixel resolve granularity.
++  const Transfer::Rectangle* color_transfer_cutout = nullptr;
++  if (draw_writes_color_opaquely && !interlock_barrier_only &&
++      !(depth_and_color_rts_used_bits & 1) && depth_and_color_rts_used_bits) {
++    int32_t left, top, right, bottom;
++    draw_util::Scissor scissor;
++    draw_util::GetScissor(regs, scissor, true);
++    if (draw_extent_estimator_.EstimateVertexRectangle(vertex_shader, left, top, right, bottom)) {
++      left = std::max(left, int32_t(scissor.offset[0]));
++      top = std::max(top, int32_t(scissor.offset[1]));
++      right = std::min(right, int32_t(scissor.offset[0] + scissor.extent[0]));
++      bottom = std::min(bottom, int32_t(scissor.offset[1] + scissor.extent[1]));
++      left = std::max(int32_t(0), (left + 7) & ~int32_t(7));
++      top = std::max(int32_t(0), (top + 7) & ~int32_t(7));
++      right &= ~int32_t(7);
++      bottom &= ~int32_t(7);
++      if (left < right && top < bottom) {
++        last_update_transfer_cutout_.x_pixels = uint32_t(left);
++        last_update_transfer_cutout_.y_pixels = uint32_t(top);
++        last_update_transfer_cutout_.width_pixels = uint32_t(right - left);
++        last_update_transfer_cutout_.height_pixels = uint32_t(bottom - top);
++        last_update_transfer_cutout_valid_ = true;
++        color_transfer_cutout = &last_update_transfer_cutout_;
++      }
++    }
++  }
++
+   // From now on ownership transfers should succeed for simplicity and
+   // consistency, even if they fail in the implementation (just ignore that and
+   // draw with whatever contents currently are in the render target in this
+@@ -686,8 +720,19 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
      const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
      uint32_t rt_bit_index = rt_base_index.second;
@@ -14813,9 +15030,13 @@ index 953c5fd..997031b 100644
 +          rt_keys[rt_bit_index].key, 0,
 +          claim_end - xenos::kEdramTileCount};
      ChangeOwnership(rt_keys[rt_bit_index], 0, rt_lengths_tiles[i],
-                     interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
+-                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index]);
++                    interlock_barrier_only ? nullptr : &last_update_transfers_[rt_bit_index],
++                    rt_bit_index ? color_transfer_cutout : nullptr);
    }
-@@ -762,12 +773,17 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+ 
+   if (interlock_barrier_only) {
+@@ -762,12 +807,17 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
  }
  
  uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
@@ -14834,7 +15055,7 @@ index 953c5fd..997031b 100644
      return 0;
    }
    uint32_t rts_used = 0;
-@@ -777,12 +793,15 @@ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
+@@ -777,12 +827,15 @@ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
        if (depth_and_color_formats_out) {
          depth_and_color_formats_out[i] = 0;
        }
@@ -14850,7 +15071,7 @@ index 953c5fd..997031b 100644
    }
    return rts_used;
  }
-@@ -836,6 +855,32 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
+@@ -836,6 +889,32 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
    group_count_y_out = (transfer_rectangle.height_pixels * pixel_size_y) >> 3;
  }
  
@@ -14883,7 +15104,7 @@ index 953c5fd..997031b 100644
  void RenderTargetCache::GetResolveCopyRectanglesToDump(
      uint32_t base, uint32_t row_length, uint32_t rows, uint32_t pitch,
      std::vector<ResolveCopyDumpRectangle>& rectangles_out) const {
-@@ -845,6 +890,37 @@ void RenderTargetCache::GetResolveCopyRectanglesToDump(
+@@ -845,6 +924,37 @@ void RenderTargetCache::GetResolveCopyRectanglesToDump(
    if (!row_length || !rows) {
      return;
    }
@@ -17399,14 +17620,60 @@ index ec0df7c..1202e8e 100644
  
  bool SharedMemory::RequestRange(uint32_t start, uint32_t length) {
 diff --git a/src/graphics/util/draw.cpp b/src/graphics/util/draw.cpp
-index 305380e..a393ac0 100644
+index 305380e..514d7e7 100644
 --- a/src/graphics/util/draw.cpp
 +++ b/src/graphics/util/draw.cpp
-@@ -762,10 +762,13 @@ const ResolveCopyShaderInfo resolve_copy_shader_info[size_t(ResolveCopyShaderInd
+@@ -762,10 +762,59 @@ const ResolveCopyShaderInfo resolve_copy_shader_info[size_t(ResolveCopyShaderInd
      {"Resolve Copy Full 128bpp", true, 2, 4, 4, 3},
  };
  
 +NativeTilingResolve native_tiling_resolve;
++
++bool DrawWritesColorOpaquely(const RegisterFile& regs, const Shader* pixel_shader,
++                             uint32_t normalized_color_mask) {
++  if (!pixel_shader || !normalized_color_mask || pixel_shader->kills_pixels() ||
++      pixel_shader->writes_depth()) {
++    return false;
++  }
++  auto rb_colorcontrol = regs.Get<reg::RB_COLORCONTROL>();
++  if ((rb_colorcontrol.alpha_test_enable &&
++       rb_colorcontrol.alpha_func != xenos::CompareFunction::kAlways) ||
++      rb_colorcontrol.alpha_to_mask_enable) {
++    return false;
++  }
++  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
++  if (pa_su_sc_mode_cntl.cull_front || pa_su_sc_mode_cntl.cull_back ||
++      pa_su_sc_mode_cntl.poly_mode != xenos::PolygonModeEnable::kDisabled ||
++      (regs[XE_GPU_REG_PA_SC_AA_MASK] & 0xF) != 0xF) {
++    return false;
++  }
++  for (uint32_t i = 0; i < xenos::kMaxColorRenderTargets; ++i) {
++    const uint32_t mask = (normalized_color_mask >> (4 * i)) & 0xF;
++    if (!mask) {
++      continue;
++    }
++    // The result must not depend on what is in the render target: the
++    // destination factor is zero, the source factor does not read the
++    // destination, and the operation is source + / - 0.
++    auto blend = regs.Get<reg::RB_BLENDCONTROL>(reg::RB_BLENDCONTROL::rt_register_indices[i]);
++    auto source_only = [](xenos::BlendFactor source, xenos::BlendOp op,
++                          xenos::BlendFactor dest) {
++      return dest == xenos::BlendFactor::kZero &&
++             (op == xenos::BlendOp::kAdd || op == xenos::BlendOp::kSubtract) &&
++             source != xenos::BlendFactor::kDstColor &&
++             source != xenos::BlendFactor::kOneMinusDstColor &&
++             source != xenos::BlendFactor::kDstAlpha &&
++             source != xenos::BlendFactor::kOneMinusDstAlpha &&
++             source != xenos::BlendFactor::kSrcAlphaSaturate;
++    };
++    if (mask != 0xF ||
++        !source_only(blend.color_srcblend, blend.color_comb_fcn, blend.color_destblend) ||
++        !source_only(blend.alpha_srcblend, blend.alpha_comb_fcn, blend.alpha_destblend)) {
++      return false;
++    }
++  }
++  return true;
++}
 +
  bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
                      uint32_t draw_resolution_scale_x, uint32_t draw_resolution_scale_y,
@@ -17417,7 +17684,7 @@ index 305380e..a393ac0 100644
    // Don't pass uninitialized values to shaders, not to leak data to frame
    // captures. Also initialize an invalid resolve to empty.
    info_out.coordinate_info.packed = 0;
-@@ -826,6 +829,15 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+@@ -826,6 +875,15 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
      y1 += pa_sc_window_offset.window_y_offset;
    }
  
@@ -17433,7 +17700,7 @@ index 305380e..a393ac0 100644
    // Apply the scissor and prevent negative origin (behind the EDRAM base).
    Scissor scissor;
    // False because clamping to the surface pitch will be done later (it will be
-@@ -881,6 +893,12 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
+@@ -881,6 +939,12 @@ bool GetResolveInfo(const RegisterFile& regs, const memory::Memory& memory,
      REXGPU_ERROR("Resolve region {} <= y < {} is taller than {}", y0, y1, xenos::kMaxResolveSize);
      y1 = y0 + int32_t(xenos::kMaxResolveSize);
    }
@@ -17446,6 +17713,231 @@ index 305380e..a393ac0 100644
  
    assert_true(x0 < x1 && y0 < y1);
    if (x0 >= x1 || y0 >= y1) {
+diff --git a/src/graphics/util/draw_extent_estimator.cpp b/src/graphics/util/draw_extent_estimator.cpp
+index 3027dc8..9a76d10 100644
+--- a/src/graphics/util/draw_extent_estimator.cpp
++++ b/src/graphics/util/draw_extent_estimator.cpp
+@@ -62,6 +62,12 @@ namespace rex::graphics {
+ void DrawExtentEstimator::PositionYExportSink::Export(ucode::ExportRegister export_register,
+                                                       const float* value, uint32_t value_mask) {
+   if (export_register == ucode::ExportRegister::kVSPosition) {
++    if (value_mask & 0b0001) {
++      position_x_ = value[0];
++    }
++    if (value_mask & 0b0100) {
++      position_z_ = value[2];
++    }
+     if (value_mask & 0b0010) {
+       position_y_ = value[1];
+     }
+@@ -250,6 +256,207 @@ uint32_t DrawExtentEstimator::EstimateVertexMaxY(const Shader& vertex_shader) {
+          8;
+ }
+ 
++bool DrawExtentEstimator::EstimateVertexRectangle(const Shader& vertex_shader, int32_t& left,
++                                                  int32_t& top, int32_t& right, int32_t& bottom) {
++  const RegisterFile& regs = register_file_;
++  auto vgt_draw_initiator = regs.Get<reg::VGT_DRAW_INITIATOR>();
++  const xenos::PrimitiveType prim_type = vgt_draw_initiator.prim_type;
++  const uint32_t count = vgt_draw_initiator.num_indices;
++  const bool rectangle_list = prim_type == xenos::PrimitiveType::kRectangleList && count == 3;
++  if (!rectangle_list &&
++      !((prim_type == xenos::PrimitiveType::kQuadList ||
++         prim_type == xenos::PrimitiveType::kTriangleStrip ||
++         prim_type == xenos::PrimitiveType::kTriangleFan) &&
++        count == 4) &&
++      !(prim_type == xenos::PrimitiveType::kTriangleList && count == 6)) {
++    return false;
++  }
++  if (vgt_draw_initiator.source_select != xenos::SourceSelect::kDMA &&
++      vgt_draw_initiator.source_select != xenos::SourceSelect::kAutoIndex) {
++    return false;
++  }
++  if (xenos::IsMajorModeExplicit(vgt_draw_initiator.major_mode, prim_type) &&
++      regs.Get<reg::VGT_OUTPUT_PATH_CNTL>().path_select ==
++          xenos::VGTOutputPath::kTessellationEnable) {
++    return false;
++  }
++  if (!vertex_shader.is_ucode_analyzed() || !ShaderInterpreter::CanInterpretShader(vertex_shader)) {
++    return false;
++  }
++  auto vgt_dma_size = regs.Get<reg::VGT_DMA_SIZE>();
++  const void* index_buffer = nullptr;
++  xenos::Endian index_endian = vgt_dma_size.swap_mode;
++  const bool index_16 = vgt_draw_initiator.index_size == xenos::IndexFormat::kInt16;
++  if (vgt_draw_initiator.source_select == xenos::SourceSelect::kDMA) {
++    if (vgt_dma_size.num_words < count) {
++      return false;
++    }
++    uint32_t index_buffer_base = regs[XE_GPU_REG_VGT_DMA_BASE];
++    if (index_16) {
++      if (index_endian == xenos::Endian::k8in32) {
++        index_endian = xenos::Endian::k8in16;
++      } else if (index_endian == xenos::Endian::k16in32) {
++        index_endian = xenos::Endian::kNone;
++      }
++      index_buffer_base &= ~uint32_t(sizeof(uint16_t) - 1);
++    } else {
++      index_buffer_base &= ~uint32_t(sizeof(uint32_t) - 1);
++    }
++    index_buffer = memory_.TranslatePhysical(index_buffer_base);
++  }
++  const uint32_t index_offset = regs.Get<reg::VGT_INDX_OFFSET>().indx_offset;
++  const uint32_t min_index = regs.Get<reg::VGT_MIN_VTX_INDX>().min_indx;
++  const uint32_t max_index = regs.Get<reg::VGT_MAX_VTX_INDX>().max_indx;
++  auto pa_cl_vte_cntl = regs.Get<reg::PA_CL_VTE_CNTL>();
++  const float x_scale =
++      pa_cl_vte_cntl.vport_x_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XSCALE) : 1.0f;
++  const float x_offset =
++      pa_cl_vte_cntl.vport_x_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_XOFFSET) : 0.0f;
++  const float y_scale =
++      pa_cl_vte_cntl.vport_y_scale_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YSCALE) : 1.0f;
++  const float y_offset =
++      pa_cl_vte_cntl.vport_y_offset_ena ? regs.Get<float>(XE_GPU_REG_PA_CL_VPORT_YOFFSET) : 0.0f;
++  // Screen-space offset of pixel centers: window offset and the D3D9 half
++  // pixel, as in EstimateVertexMaxY.
++  float screen_x = 0.0f, screen_y = 0.0f;
++  if (regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero) {
++    screen_x += 0.5f;
++    screen_y += 0.5f;
++  }
++  if (regs.Get<reg::PA_SU_SC_MODE_CNTL>().vtx_window_offset_enable) {
++    auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
++    screen_x += float(pa_sc_window_offset.window_x_offset);
++    screen_y += float(pa_sc_window_offset.window_y_offset);
++  }
++
++  // With clipping, the primitive is cut to the viewport and the depth range,
++  // and must not be clipped by user planes.
++  auto pa_cl_clip_cntl = regs.Get<reg::PA_CL_CLIP_CNTL>();
++  const bool clipped = !pa_cl_clip_cntl.clip_disable;
++  if (clipped && (pa_cl_clip_cntl.value & 0x3F)) {
++    return false;
++  }
++  float xs[6], ys[6];
++  shader_interpreter_.SetShader(vertex_shader);
++  PositionYExportSink sink;
++  shader_interpreter_.SetExportSink(&sink);
++  bool valid = true;
++  for (uint32_t i = 0; i < count && valid; ++i) {
++    uint32_t vertex_index = i;
++    if (index_buffer) {
++      vertex_index = index_16 ? uint32_t(static_cast<const uint16_t*>(index_buffer)[i])
++                              : static_cast<const uint32_t*>(index_buffer)[i];
++      vertex_index = xenos::GpuSwap(vertex_index, index_endian) & 0xFFFFFF;
++    }
++    vertex_index = std::min(max_index, std::max(min_index, (vertex_index + index_offset) & 0xFFFFFF));
++    sink.Reset();
++    shader_interpreter_.temp_registers()[0] = float(vertex_index);
++    shader_interpreter_.Execute();
++    if ((sink.vertex_kill().has_value() && (sink.vertex_kill().value() & ~(UINT32_C(1) << 31))) ||
++        !sink.position_x().has_value() || !sink.position_y().has_value()) {
++      valid = false;
++      break;
++    }
++    float x = sink.position_x().value(), y = sink.position_y().value();
++    if (clipped) {
++      // Not near- / far-clipped: 0 <= z <= w (Direct3D convention).
++      if (!sink.position_z().has_value() || !sink.position_w().has_value() ||
++          !(sink.position_z().value() >= 0.0f) ||
++          !(sink.position_z().value() <= sink.position_w().value())) {
++        valid = false;
++        break;
++      }
++    }
++    if (!pa_cl_vte_cntl.vtx_xy_fmt) {
++      if (!sink.position_w().has_value() || !(sink.position_w().value() > 0.0f)) {
++        valid = false;
++        break;
++      }
++      x /= sink.position_w().value();
++      y /= sink.position_w().value();
++    }
++    xs[i] = x * x_scale + x_offset + screen_x;
++    ys[i] = y * y_scale + y_offset + screen_y;
++    if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) {
++      valid = false;
++    }
++  }
++  shader_interpreter_.SetExportSink(nullptr);
++  if (!valid) {
++    return false;
++  }
++  const float x0 = *std::min_element(xs, xs + count), x1 = *std::max_element(xs, xs + count);
++  const float y0 = *std::min_element(ys, ys + count), y1 = *std::max_element(ys, ys + count);
++  // Clipped to the viewport ([-1, 1] in normalized device coordinates).
++  float clip_x0 = x0, clip_x1 = x1, clip_y0 = y0, clip_y1 = y1;
++  if (clipped) {
++    clip_x0 = std::max(clip_x0, x_offset - std::abs(x_scale) + screen_x);
++    clip_x1 = std::min(clip_x1, x_offset + std::abs(x_scale) + screen_x);
++    clip_y0 = std::max(clip_y0, y_offset - std::abs(y_scale) + screen_y);
++    clip_y1 = std::min(clip_y1, y_offset + std::abs(y_scale) + screen_y);
++  }
++  if (!rectangle_list) {
++    // Every vertex must be a corner of the bounding rectangle, and the
++    // triangles must not leave a gap: each one has three distinct corners, and
++    // the two of them differ (then they are the two halves of the rectangle).
++    auto corner = [&](uint32_t i) -> int {
++      const bool left_side = xs[i] == x0, right_side = xs[i] == x1;
++      const bool top_side = ys[i] == y0, bottom_side = ys[i] == y1;
++      if ((!left_side && !right_side) || (!top_side && !bottom_side)) {
++        return -1;
++      }
++      return (right_side ? 1 : 0) | (bottom_side ? 2 : 0);
++    };
++    int corners[6];
++    for (uint32_t i = 0; i < count; ++i) {
++      corners[i] = corner(i);
++      if (corners[i] < 0) {
++        return false;
++      }
++    }
++    if (prim_type == xenos::PrimitiveType::kQuadList) {
++      if ((1 << corners[0] | 1 << corners[1] | 1 << corners[2] | 1 << corners[3]) != 0xF) {
++        return false;
++      }
++    } else {
++      int triangles[2][3];
++      for (int t = 0; t < 2; ++t) {
++        for (int v = 0; v < 3; ++v) {
++          int index;
++          if (prim_type == xenos::PrimitiveType::kTriangleList) {
++            index = t * 3 + v;
++          } else if (prim_type == xenos::PrimitiveType::kTriangleStrip) {
++            index = t + v;
++          } else {
++            index = v ? t + v : 0;  // fan
++          }
++          triangles[t][v] = corners[index];
++        }
++      }
++      int masks[2];
++      for (int t = 0; t < 2; ++t) {
++        masks[t] = 1 << triangles[t][0] | 1 << triangles[t][1] | 1 << triangles[t][2];
++        if (__builtin_popcount(masks[t]) != 3) {
++          return false;
++        }
++      }
++      // Two different 3-corner triangles of a rectangle cover it only if they
++      // are split along the same diagonal: the corners each one misses are
++      // opposite (0 and 3, or 1 and 2).
++      const int missing0 = 0xF & ~masks[0], missing1 = 0xF & ~masks[1];
++      if (!((missing0 | missing1) == 0x9 || (missing0 | missing1) == 0x6)) {
++        return false;
++      }
++    }
++  }
++  // Pixels whose centers (px + 0.5) are within [x0, x1) x [y0, y1).
++  left = int32_t(std::ceil(clip_x0 - 0.5f));
++  right = int32_t(std::ceil(clip_x1 - 0.5f));
++  top = int32_t(std::ceil(clip_y0 - 0.5f));
++  bottom = int32_t(std::ceil(clip_y1 - 0.5f));
++  return left < right && top < bottom;
++}
++
+ uint32_t DrawExtentEstimator::EstimateMaxY(bool try_to_estimate_vertex_max_y,
+                                            const Shader& vertex_shader) {
+   SCOPE_profile_cpu_f("gpu");
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
 index 813bb1c..7b53d2c 100644
 --- a/src/input/input_system.cpp

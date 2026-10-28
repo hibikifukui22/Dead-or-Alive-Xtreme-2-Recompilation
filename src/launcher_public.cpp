@@ -583,6 +583,7 @@ void Launch(HWND window) {
       + L" --gpu_force_1x_msaa=" + true_false(s.msaa_off)
       + L" --gpu_native_tiling=" + true_false(s.native_renderer)
       + L" --gpu_native_clears=" + true_false(s.native_renderer)
+      + L" --gpu_native_transfer_elision=" + true_false(s.native_renderer)
       // Display Refresh Compatibility: presents on their own GPU queue.
       + L" --d3d12_separate_present_queue=" + true_false(s.display_refresh_compat)
       + L" --vsync=" + true_false(s.vsync)
