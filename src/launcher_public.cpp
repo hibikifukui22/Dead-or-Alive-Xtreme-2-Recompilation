@@ -48,7 +48,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.1.5";
+constexpr const wchar_t* kVersion = L"v1.1.6";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;
@@ -601,9 +601,12 @@ void Launch(HWND window) {
       + L" --fullscreen=" + true_false(s.fullscreen)
       + L" --doax2_fps_overlay=" + true_false(s.fps_overlay)
       + L" --swap_post_effect=" + PostProcessAAName(s.post_process_aa)
-      // Renderer performance: exact screen-space draw extents, batched uploads.
+      // Renderer performance: exact screen-space draw extents, batched uploads;
+      // frames split every 150 draws so the submission thread replays and
+      // submits the earlier parts while the rest is recorded.
       + L" --execute_unclipped_draw_vs_on_cpu=true --execute_unclipped_draw_vs_on_cpu_with_scissor=true"
-      + L" --d3d12_doax2_submit_draw_interval=0 --d3d12_doax2_batch_uploads=true"
+      + L" --d3d12_doax2_submit_draw_interval=150 --d3d12_async_submission=true"
+      + L" --d3d12_doax2_batch_uploads=true"
       + L" --d3d12_doax2_async_occlusion_query=true"
       // 30 FPS keeps the original free-running vblank; 60 FPS locks guest
       // vblanks to the display (even frame delivery).

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.1.6 (experimental pre-release)
+
+- **Lower CPU load in the renderer** (for CPUs that held the frame rate
+  below 60, for example 55-60 FPS in the swimsuit menu): the thread that
+  turns the game's graphics commands into PC GPU commands needs about half
+  the time it did in 1.1.5 (swimsuit menu: 4.1 -> 2.1 ms per frame in
+  tests).
+  - GPU register writes are processed in batches.
+  - Game memory that hasn't changed is no longer re-copied to the graphics
+    card every frame (the swimsuit menu copied 11.6 MB per frame, nearly
+    all of it unchanged).
+  - A second CPU thread now records and submits most of each frame's GPU
+    work while the main graphics thread continues with the rest.
+- With MSAA Mode Off, the log no longer fills with "Incorrect resolve
+  sample selected" warnings.
+- The log's GPU statistics now include per-frame upload sizes.
+
 ## 1.1.5
 
 - **Native Renderer (experimental, on by default):** new Graphics setting.
