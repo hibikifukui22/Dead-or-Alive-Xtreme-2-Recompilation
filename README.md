@@ -10,10 +10,11 @@ recompiler. The game's PowerPC code is translated ahead of time into C++ and
 runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 
 > [!WARNING]
-> At the moment, Intel integrated graphics are not supported. Dedicated
-> graphics cards by Intel have not been tested; expect issues on these. The
-> system requirements below are also estimates. Feel free to try running the
-> game on low-end hardware.
+> Intel integrated graphics now work with the **DX12 (Native)** renderer. On
+> Intel Iris Xe, **Vulkan (Native)** crashes at the title screen, so use DX12
+> (Native) there. Dedicated graphics cards by Intel have not been tested;
+> expect issues on these. The system requirements below are also estimates.
+> Feel free to try running the game on low-end hardware.
 
 > **This repository and its releases do not contain the game.** No game code,
 > data, audio or video is included. You need your own copy of Dead or Alive
@@ -25,7 +26,7 @@ runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
 > Not affiliated with or endorsed by Koei Tecmo, Team NINJA or Microsoft.
 > All trademarks belong to their respective owners.
 
-Current version: **1.1.4** (see [CHANGELOG.md](CHANGELOG.md)).
+Current version: **1.1.6** (see [CHANGELOG.md](CHANGELOG.md)).
 
 ## Supported game version
 
@@ -54,6 +55,33 @@ Title updates are not supported.
    release (see [Updating](#updating)).
 
 Saves are written to the `userdata` folder next to the launcher.
+
+## Renderers
+
+Choose the renderer under **Renderer** on the launcher's **Graphics Settings**
+page. Since v1.1.6 the native renderers draw the game's render passes the way
+the game describes them, instead of emulating the Xbox 360's graphics chip and
+its 10 MB of fast video memory (EDRAM). This should help lower-end systems run
+the game, such as PCs with GTX 900 and 1000 series graphics cards.
+
+| Renderer | Use it for |
+|---|---|
+| **Vulkan (Native)** | Recommended first: the lowest GPU load, to target higher FPS. New and still experimental. Screen copies go straight into the textures that use them. |
+| **DX12 (Native)** | The default, and the one to use on Intel integrated graphics. Draws each 3D scene once, with much lower CPU load than Emulated. |
+| **Emulated** | The original, slowest path. Use it if something looks wrong on both native renderers, and please report it. |
+
+If one native renderer does not work well on your PC, try the other: each is a
+fallback for the other. **We need testers for Vulkan (Native):** please
+[open an issue](../../issues) with how it runs, your graphics card, your
+settings and the FPS you get.
+
+In tests at 4K on an RTX 3090, DX12 (Native) cut GPU time at the pool from 14.0
+to 8.4 ms per frame, and Vulkan (Native) took the swimsuit menu from 39 to a
+locked 60 FPS.
+
+Frame pacing follows your display: when its refresh rate is a multiple of the
+game's frame rate (60, 120, 180, 240 Hz and up), every frame lands on its own
+refresh. Other refresh rates, and G-SYNC / FreeSync, use a precise timer.
 
 ## Updating
 
@@ -118,9 +146,13 @@ for the details and for how to turn networking back on.
 
 ## System requirements
 
-The game is rendered on the GPU through Direct3D 12, emulating the Xbox 360's
-graphics chip, so the graphics card matters most. Targets are 60 FPS with
-Resolution Scale at 1x.
+The game is rendered on the GPU through Direct3D 12 or Vulkan (see
+[Renderers](#renderers)), so the graphics card matters most. Targets are 60 FPS
+with Resolution Scale at 1x.
+
+These figures were measured before the native renderers, with what is now the
+Emulated renderer. The native renderers need less, so lower-end cards than the
+ones listed may run the game well. New figures will follow as results come in.
 
 | | 1080p: Minimum | 1080p: Recommended | 1440p: Minimum | 1440p: Recommended |
 |---|---|---|---|---|
@@ -128,13 +160,13 @@ Resolution Scale at 1x.
 | **Processor** | Intel Core i5-10400<br>AMD Ryzen 5 3600 | Intel Core i5-12400<br>AMD Ryzen 5 5600X | Intel Core i5-12400<br>AMD Ryzen 5 5600X | Intel Core i5-12600K<br>AMD Ryzen 7 5800X3D |
 | **Memory** | 8 GB | 16 GB | 16 GB | 16 GB |
 
-All configurations: Windows 10 or 11 (64-bit), a DirectX 12 graphics card
-with up-to-date drivers, and about 7 GB of free space (the extracted game is
+All configurations: Windows 10 or 11 (64-bit), a graphics card with DirectX 12
+or Vulkan support and up-to-date drivers, and about 7 GB of free space (the extracted game is
 about 6.2 GB, the release about 55 MB).
 
 For **4K at 60 FPS**, plan on an NVIDIA RTX 4080 or AMD RX 7900 XTX class card.
 
-### Tested results
+### Tested results (Emulated renderer)
 
 | System | 1080p | 1440p | 4K |
 |---|---|---|---|
@@ -169,8 +201,9 @@ cmake --build out\game
 | `src/` | Port code: `main.cpp`, the 60 FPS / timing hooks (`doax2_60fps.cpp`), the release launcher (`launcher_public.cpp`) and the developer launcher (`launcher.cpp`) |
 | `resources/launcher/` | Launcher art (background, fan-made logo, icon) embedded into the launcher |
 | `config/`, `doax2_manifest.toml` | ReXGlue code generation manifest (function boundaries, fibers) |
-| `patches/rexglue-sdk/` | This project's changes to ReXGlue SDK v0.10.0 (renderer fixes, title music player) |
+| `patches/rexglue-sdk/` | This project's changes to ReXGlue SDK v0.10.0 (native renderers, renderer fixes, title music player) |
 | `sdk/rexglue-sdk/` | ReXGlue SDK v0.10.0 (git submodule) |
+| `android/` | Android app sources (in development, not part of the Windows release) |
 | `scripts/` | Setup, code generation, build, release packaging and analysis helpers |
 | `tests/`, `tools/` | Host-side tests and small developer utilities |
 | `docs/` | Build and release guides; `docs/notes/` holds engineering notes from development |
