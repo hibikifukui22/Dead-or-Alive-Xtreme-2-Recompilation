@@ -1,8 +1,11 @@
 # Native renderer
 
-The launcher's **Native Renderer (Experimental)** option (on by default since
-1.1.5) makes the GPU emulation aware of the game's Direct3D render passes
-instead of reconstructing everything from the Xbox 360's 10 MB EDRAM.
+The launcher's **Renderer** setting: **DX12 (Native)** (the default since
+1.1.6) and **Vulkan (Native)** make the GPU emulation aware of the game's
+Direct3D render passes instead of reconstructing everything from the Xbox
+360's 10 MB EDRAM; **Emulated** turns this off (DX12). The native layer lives
+in the shared command processor and render target cache, so both backends
+get it (`--gpu_backend=d3d12|vulkan`).
 
 ## How it works
 
@@ -71,9 +74,32 @@ With the extended clears and transfer elision (same PC, FPS overlay off):
 | Pool Side: GPU busy | 14.0 ms | 8.4 ms |
 | Swimsuit menu: GPU busy / command processor | 19.0 / 21.2 ms | 12.3 / 4.1 ms |
 
+## Vulkan screen copies (1.1.6)
+
+Resolves that the Xbox 360 did almost for free (EDRAM to memory) cost a dump,
+a copy shader, a texture load and a buffer-to-image copy on PC. On Vulkan:
+
+- `vulkan_direct_texture_store`: texture loads write the image with a compute
+  shader through a uint view (1/2/4/8/16 bytes per texel) instead of
+  `vkCmdCopyBufferToImage`.
+- `vulkan_direct_resolve_to_texture` / `vulkan_direct_depth_resolve_to_texture`:
+  k_8_8_8_8 (1x, 2x averaged) and kD24S8 -> k_24_8 resolves are also written
+  straight from the host render target into the destination texture,
+  bit-exact with the memory path, so the texture doesn't reload.
+- `vulkan_lazy_resolve_memory`: such resolves skip the memory write; the
+  texture is written back to the scaled resolve memory only when something
+  else reads that memory (another texture, eviction). Later resolves into the
+  same memory mark the overwritten texels dead instead of forcing a write-back.
+- `vulkan_direct_resolve_verify`, `vulkan_doax2_resolve_census`: diagnostics.
+
+4K, RTX 3090: volleyball 10.3 -> 4.6 ms GPU per frame, swimsuit menu
+6.8 -> 5.7 ms (on top of the partial reloads).
+
+The shared bookkeeping is in the base texture cache; D3D12 would need its own
+shaders and UAV views for the same.
+
 ## Next steps
 
-Vulkan backend (Android): everything above lives in the shared command
-processor / render target cache / draw_util except `IssueNativeClear` (D3D12
-override) and passing `last_update_transfer_cutout()` to the transfer
-drawing; the Vulkan render target cache needs the same two hooks.
+Android: the Vulkan renderer is the base; mobile GPUs may lack some storage
+image formats (the direct texture store checks the view format's support and
+falls back to the image copy).

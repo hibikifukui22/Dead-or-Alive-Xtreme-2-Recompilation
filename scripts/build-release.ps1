@@ -36,12 +36,17 @@ $prefixMap = "`"-ffile-prefix-map=$rootFwd/=`" `"-ffile-prefix-map=$projectRoot\
 $cFlags = "-march=x86-64-v2 $prefixMap"
 $linkFlags = '-Wl,/PDBALTPATH:%_PDB%'
 
+# Native tools write warnings to stderr, which Windows PowerShell turns into
+# terminating errors when output is redirected; their exit codes are checked.
+$ErrorActionPreference = 'Continue'
 if (-not $SkipSdk) {
     Write-Host '== ReXGlue SDK (release build)'
     & (Join-Path $PSScriptRoot 'setup-sdk.ps1') -SkipBuild
     Push-Location $sdkSource
     try {
-        cmake --preset win-amd64 -B $sdkBuild -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON `
+        # Both graphics backends: the launcher offers DX12 and Vulkan.
+        cmake --preset win-amd64 -B $sdkBuild -DCMAKE_EXPORT_NO_PACKAGE_REGISTRY=ON -DREXGLUE_USE_VULKAN=ON `
+            "-DREXGLUE_OUTPUT_DIR=$(Join-Path $releaseOut 'sdk-bin')" `
             "-DCMAKE_INSTALL_PREFIX=$sdkInstall" "-DCMAKE_C_FLAGS=$cFlags" "-DCMAKE_CXX_FLAGS=$cFlags" `
             "-DCMAKE_EXE_LINKER_FLAGS=$linkFlags" "-DCMAKE_SHARED_LINKER_FLAGS=$linkFlags"
         if ($LASTEXITCODE) { throw 'SDK configure failed.' }
@@ -65,6 +70,7 @@ try {
     if ($LASTEXITCODE) { throw 'Game build failed.' }
 } finally { Pop-Location }
 
+$ErrorActionPreference = 'Stop'
 Write-Host '== Packaging'
 $package = Join-Path $dist $name
 if (Test-Path -LiteralPath $package) { Remove-Item -LiteralPath $package -Recurse -Force }

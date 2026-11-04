@@ -173,7 +173,8 @@ bool ClearBegin(PPCContext& ctx, uint8_t* base) {
     for (uint32_t i = 0; i < 4; ++i) payload[6 + i] = REX_LOAD_U32(color + i * 4);
   const float z = float(ctx.f1.f64);
   std::memcpy(&payload[10], &z, sizeof(z));
-  payload[11] = ctx.r7.u32;
+  // Stencil: r8 (the float Z in f1 also takes up the r7 argument slot).
+  payload[11] = ctx.r8.u32;
   if (ValidGuest(rt0)) {
     payload[12] = REX_LOAD_U32(rt0 + 0x18);
     payload[13] = REX_LOAD_U32(rt0 + 0x1C);

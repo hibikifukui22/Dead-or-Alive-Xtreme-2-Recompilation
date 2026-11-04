@@ -98,6 +98,10 @@ constexpr KeyAction kKeyActions[] = {
 };
 constexpr size_t kKeyActionCount = std::size(kKeyActions);
 
+constexpr int kRendererEmulated = 0;
+constexpr int kRendererD3D12 = 1;
+constexpr int kRendererVulkan = 2;
+
 struct Settings {
   int width = 1280;
   int height = 720;
@@ -105,12 +109,15 @@ struct Settings {
   int anisotropic = 3;
   bool native_2x_msaa = true;
   bool msaa_off = false;                 // draw without MSAA (lower-end GPUs; pair with FXAA)
-  bool native_renderer = true;           // D3D-aware render passes (tiling collapse, native clears)
+  // Renderer: kRendererEmulated (D3D12, EDRAM emulation), kRendererD3D12 or
+  // kRendererVulkan (D3D-aware render passes: tiling collapse, native clears).
+  int renderer = 1;
   bool display_refresh_compat = false;   // dedicated present queue
   bool vsync = true;
   bool fullscreen = false;
   int frame_rate_mode = kMode60;
   int post_process_aa = 0;
+  bool shadows = true;  // dynamic character shadows (shadow map pass)
   bool fps_overlay = false;
   bool diagnostics = false;
   bool keep_song = false;
@@ -268,13 +275,16 @@ Settings LoadSettings() {
   settings.anisotropic = std::clamp(ReadInt(values, "anisotropic_override", settings.anisotropic), -1, 5);
   settings.native_2x_msaa = ReadBool(values, "native_2x_msaa", settings.native_2x_msaa);
   settings.msaa_off = ReadBool(values, "msaa_off", settings.msaa_off);
-  settings.native_renderer = ReadBool(values, "native_renderer", settings.native_renderer);
+  // Older settings only have the Native Renderer toggle (D3D12).
+  settings.renderer = ReadBool(values, "native_renderer", true) ? kRendererD3D12 : kRendererEmulated;
+  settings.renderer = std::clamp(ReadInt(values, "renderer", settings.renderer), kRendererEmulated, kRendererVulkan);
   settings.display_refresh_compat =
       ReadBool(values, "display_refresh_compatibility", settings.display_refresh_compat);
   settings.vsync = ReadBool(values, "vsync", settings.vsync);
   settings.fullscreen = ReadBool(values, "fullscreen", settings.fullscreen);
   settings.frame_rate_mode = ReadInt(values, "frame_rate_mode", settings.frame_rate_mode) == kMode30 ? kMode30 : kMode60;
   settings.post_process_aa = std::clamp(ReadInt(values, "post_process_aa", settings.post_process_aa), 0, 2);
+  settings.shadows = ReadBool(values, "shadows", settings.shadows);
   settings.fps_overlay = ReadBool(values, "fps_overlay", settings.fps_overlay);
   settings.diagnostics = ReadBool(values, "diagnostics", settings.diagnostics);
   settings.keep_song = ReadBool(values, "keep_song", settings.keep_song);
@@ -313,13 +323,14 @@ void SaveSettings() {
          << "resolution_scale=" << s.scale << '\n'
          << "anisotropic_override=" << s.anisotropic << '\n'
          << "native_2x_msaa=" << (s.native_2x_msaa ? "true" : "false") << '\n'
-         << "native_renderer=" << (s.native_renderer ? "true" : "false") << '\n'
+         << "renderer=" << s.renderer << '\n'
          << "msaa_off=" << (s.msaa_off ? "true" : "false") << '\n'
          << "display_refresh_compatibility=" << (s.display_refresh_compat ? "true" : "false") << '\n'
          << "vsync=" << (s.vsync ? "true" : "false") << '\n'
          << "fullscreen=" << (s.fullscreen ? "true" : "false") << '\n'
          << "frame_rate_mode=" << s.frame_rate_mode << '\n'
          << "post_process_aa=" << s.post_process_aa << '\n'
+         << "shadows=" << (s.shadows ? "true" : "false") << '\n'
          << "fps_overlay=" << (s.fps_overlay ? "true" : "false") << '\n'
          << "diagnostics=" << (s.diagnostics ? "true" : "false") << '\n'
          << "keep_song=" << (s.keep_song ? "true" : "false") << '\n'
@@ -563,11 +574,16 @@ void Launch(HWND window) {
   }
   SaveSettings();
   const auto true_false = [](bool value) { return value ? L"true" : L"false"; };
+  const bool native_renderer = s.renderer != kRendererEmulated;
   std::wstring command = Quote(game_exe)
       + L" --game_data_root=" + Quote(g_root / kGameFolder)
       + L" --user_data_root=" + Quote(g_root / "userdata")
       // D3D12 render-target path with the Intel stencil/viewport corrections.
       + L" --gpu_plugin=xenos --render_target_path_d3d12=rtv"
+      + L" --gpu_backend=" + (s.renderer == kRendererVulkan ? L"vulkan" : L"d3d12")
+      // Vulkan presents without tearing and without waiting for the display
+      // (mailbox), like D3D12.
+      + L" --vulkan_allow_present_mode_immediate=false"
       + L" --native_stencil_value_output_d3d12_intel=true"
       + L" --window_width=" + std::to_wstring(s.width)
       + L" --window_height=" + std::to_wstring(s.height)
@@ -579,16 +595,19 @@ void Launch(HWND window) {
       // Native renderer: the game's D3D calls mark render passes in its command
       // buffer; tiled passes are drawn once at full size, clears are host clears.
       // MSAA off also needs the markers (the game's clears are told apart).
-      + L" --doax2_native_markers=" + true_false(s.native_renderer || s.msaa_off)
+      + L" --doax2_native_markers=" + true_false(native_renderer || s.msaa_off)
       + L" --gpu_force_1x_msaa=" + true_false(s.msaa_off)
-      + L" --gpu_native_tiling=" + true_false(s.native_renderer)
-      + L" --gpu_native_clears=" + true_false(s.native_renderer)
-      + L" --gpu_native_transfer_elision=" + true_false(s.native_renderer)
+      + L" --gpu_native_tiling=" + true_false(native_renderer)
+      + L" --gpu_native_clears=" + true_false(native_renderer)
+      + L" --gpu_native_transfer_elision=" + true_false(native_renderer)
+      // Repeated resolves copy (and textures reload) only what changed since.
+      + L" --d3d12_doax2_incremental_resolve=" + true_false(native_renderer)
       // Display Refresh Compatibility: presents on their own GPU queue.
       + L" --d3d12_separate_present_queue=" + true_false(s.display_refresh_compat)
       + L" --vsync=" + true_false(s.vsync)
-      // Guest VBlank timing stays with the game; host presentation is not
-      // serialized behind DXGI Present(1).
+      // Host presents never tear (flip model) but don't block the game thread
+      // behind Present(1) (that costs frames); the vblank lock below puts each
+      // frame on its own display refresh.
       + L" --d3d12_vsync=false --d3d12_allow_variable_refresh_rate_and_tearing=false"
       + L" --d3d12_vsync_interval=1"
       // 60 FPS runs the guest at 120 Hz vblank (one 60 Hz frame per two
@@ -596,6 +615,8 @@ void Launch(HWND window) {
       + L" --video_mode_refresh_rate=" + (native60 ? L"120" : L"60")
       + L" --vblank_counter_rate_multiplier=1"
       + L" --doax2_engine_60fps=" + true_false(native60)
+      // Shadows off: the shadow map pass draws no casters (reads as lit).
+      + L" --doax2_shadow_quality=" + (s.shadows ? L"3" : L"0")
       + L" --doax2_music_volume_bridge=true"
       + L" --gpu_allow_invalid_fetch_constants=true"
       + L" --fullscreen=" + true_false(s.fullscreen)
@@ -608,9 +629,13 @@ void Launch(HWND window) {
       + L" --d3d12_doax2_submit_draw_interval=150 --d3d12_async_submission=true"
       + L" --d3d12_doax2_batch_uploads=true"
       + L" --d3d12_doax2_async_occlusion_query=true"
-      // 30 FPS keeps the original free-running vblank; 60 FPS locks guest
-      // vblanks to the display (even frame delivery).
-      + L" --gpu_display_locked_vblank=" + true_false(native60)
+      // The game's vblank follows the display when its refresh rate is a
+      // multiple of the game's (60, 120, 180, 240 Hz...), so every frame lands
+      // on its own display refresh; otherwise (144 Hz, VRR...) a precise timer.
+      + L" --gpu_display_locked_vblank=true"
+      + L" --gpu_precise_vblank_timer=true"
+      // UI overlays repaint with the game's frames, not at every display refresh.
+      + L" --present_ui_with_guest_frames=true"
       + L" --doax2_native60_counter_scan=" + true_false(s.diagnostics)
       + L" --xmp_keep_song_across_playlists=" + true_false(s.keep_song)
       + L" --doax2_money_multiplier=" + std::to_wstring(s.money_multiplier)
@@ -1850,13 +1875,21 @@ void PaintGraphics(Graphics& g) {
            if (mode != 2) s.native_2x_msaa = mode == 0;
          });
        }},
-      {L"Native Renderer (Experimental)",
-       L"Draws the game's render passes the way the game describes them instead of emulating the Xbox "
-       L"360's 10 MB EDRAM: the main scene is drawn once instead of in two halves, and clears are done "
-       L"by your graphics card directly.\n\n"
-       L"Lowers CPU and GPU load. It is new: if you see anything drawn wrongly, turn it off, check "
-       L"whether the problem goes away, and report it.",
-       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.native_renderer); }},
+      {L"Renderer",
+       L"DX12 (Native) and Vulkan (Native) draw the game's render passes the way the game describes "
+       L"them instead of emulating the Xbox 360's 10 MB EDRAM: the main scene is drawn once, clears are "
+       L"done by your graphics card directly and repeated copies only update what changed. Lower CPU "
+       L"and GPU load.\n\n"
+       L"Vulkan (Native) is new (experimental): try it if DX12 runs poorly on your GPU or driver. "
+       L"Emulated is the original, slowest path; switch to it if you see anything drawn wrongly, and "
+       L"report the problem.",
+       [&s](Graphics& g, const RectF& r) {
+         static const wchar_t* kNames[] = {L"Emulated", L"DX12 (Native)", L"Vulkan (Native)"};
+         DrawSelector(g, r, kNames[s.renderer], [&s](int direction) {
+           StepOption(s.renderer, std::vector<int>{kRendererEmulated, kRendererD3D12, kRendererVulkan},
+                      direction);
+         });
+       }},
       {L"Post-Process Anti-Aliasing",
        L"Adds FXAA, an extra edge-smoothing filter, to the final image. FXAA Extreme smooths more.\n\n"
        L"Both make the picture slightly softer and cost a little performance. Off keeps the original "
@@ -1866,6 +1899,11 @@ void PaintGraphics(Graphics& g) {
          DrawSelector(g, r, kNames[s.post_process_aa],
                       [&s](int direction) { StepOption(s.post_process_aa, std::vector<int>{0, 1, 2}, direction); });
        }},
+      {L"Character Shadows",
+       L"The real-time shadows that the characters and moving objects cast.\n\n"
+       L"Turning them off saves a little GPU and CPU time on slower PCs. Shadows that are part of "
+       L"the scenery (trees, buildings) stay.",
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.shadows); }},
       {L"Anisotropic Filtering",
        L"Keeps textures sharp when they are seen at a steep angle, such as the sand, the water and "
        L"floors.\n\n"
@@ -1883,7 +1921,7 @@ void PaintGraphics(Graphics& g) {
        L"V-sync.",
        [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.vsync); }},
   };
-  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{79, 32, 0, true});
+  PaintSubPage(g, L"GRAPHICS SETTINGS", rows, RowStyle{70, 30, 0, true});
 }
 
 // The design space (1600 x 900) is scaled uniformly to fit the window and

@@ -21,11 +21,31 @@ set(DOAX2_SOURCES
 
 if(WIN32)
     add_executable(doax2 WIN32 ${DOAX2_SOURCES})
+elseif(ANDROID)
+    # Loaded by SDLActivity, which calls SDL_main in it.
+    add_library(doax2 SHARED ${DOAX2_SOURCES})
+    set_target_properties(doax2 PROPERTIES OUTPUT_NAME main)
 else()
     add_executable(doax2 ${DOAX2_SOURCES})
 endif()
 
 rexglue_setup_target(doax2 GPU_PLUGINS xenos)
+
+# On a case-insensitive disk the VERSION file in the project root would be found
+# as libc++'s <version>: keep the root for quoted includes only.
+if(ANDROID)
+    foreach(target doax2 doax2_recomp)
+        if(TARGET ${target})
+            get_target_property(target_includes ${target} INCLUDE_DIRECTORIES)
+            list(REMOVE_ITEM target_includes "${CMAKE_CURRENT_SOURCE_DIR}")
+            set_target_properties(${target} PROPERTIES INCLUDE_DIRECTORIES "${target_includes}")
+            target_compile_options(${target} PRIVATE "-iquote${CMAKE_CURRENT_SOURCE_DIR}")
+            # The installed SDK has these headers in its include folder.
+            target_include_directories(${target} PRIVATE
+                $<TARGET_PROPERTY:imgui,INTERFACE_INCLUDE_DIRECTORIES>)
+        endif()
+    endforeach()
+endif()
 
 # Diagnostic guest call census; configure a separate build directory with it.
 option(DOAX2_FUNC_CENSUS "Count every recompiled guest function call" OFF)
@@ -72,9 +92,11 @@ endif()
 
 # Developer utility: extracts the raw file from an Xbox 360 STFS save package.
 # It is deliberately separate from the game executable and is not installed.
+if(NOT ANDROID)
 add_executable(stfs_extract tools/stfs_extract.cpp)
 target_link_libraries(stfs_extract PRIVATE rex::runtime)
 rexglue_apply_target_settings(stfs_extract)
+endif()
 
 # Pure host-side capture tests; no game data or runtime initialization needed.
 add_executable(doax2_render_history_test EXCLUDE_FROM_ALL tests/render_history_test.cpp)

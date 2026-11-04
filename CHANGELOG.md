@@ -1,25 +1,60 @@
 # Changelog
 
-## 1.1.6 (experimental pre-release)
+## 1.1.6
 
-- **Lower CPU load in the renderer** (for CPUs that held the frame rate
-  below 60, for example 55-60 FPS in the swimsuit menu): the thread that
-  turns the game's graphics commands into PC GPU commands needs about half
-  the time it did in 1.1.5 (swimsuit menu: 4.1 -> 2.1 ms per frame in
-  tests).
-  - GPU register writes are processed in batches.
-  - Game memory that hasn't changed is no longer re-copied to the graphics
-    card every frame (the swimsuit menu copied 11.6 MB per frame, nearly
-    all of it unchanged).
-  - A second CPU thread now records and submits most of each frame's GPU
-    work while the main graphics thread continues with the rest.
-- With MSAA Mode Off, the log no longer fills with "Incorrect resolve
-  sample selected" warnings.
-- The log's GPU statistics now include per-frame upload sizes.
-
-## 1.1.5
-
-- **Native Renderer (experimental, on by default):** new Graphics setting.
+- **Renderer setting with a new Vulkan renderer (experimental)** (Graphics):
+  Emulated, DX12 (Native) or Vulkan (Native). Vulkan (Native) has the same
+  native-renderer speed-ups as DX12 and is the base for a future Android
+  version; try it if DX12 runs poorly on your GPU or driver. It presents
+  without tearing and without waiting for the display, like DX12. Fixed on
+  the way: 3D scenes drawn black, wrong alpha in some screen copies, and a
+  crash in a copy that wraps around the EDRAM end. Swimsuit menu at 4K:
+  39 -> 60 FPS in tests. The old Native Renderer toggle becomes this
+  setting (on = DX12 (Native), off = Emulated).
+- **Faster texture reloads after screen copies:** a texture that a copy
+  writes only partly now reloads just the rows that were written (both
+  renderers). Vulkan swimsuit menu GPU time at 4K: 23 -> 12 ms in tests.
+- **Much lower GPU load with Vulkan (Native):** screen copies (bloom,
+  depth of field, picture-in-picture, the swimsuit menu, the shadow map)
+  go straight from the render target into the texture that uses them, and
+  are written to the emulated memory only if something else reads that
+  memory, like on the Xbox 360 where these copies were almost free. Texture
+  uploads after copies use a compute shader instead of a slow image copy.
+  At 4K in tests: volleyball 10.3 -> 4.6 ms of GPU time per frame,
+  swimsuit menu 6.8 -> 5.7 ms on top of the gains above. DX12 (Native) has
+  the partial-reload speed-up only.
+- **Character Shadows** (Graphics, on by default): turn off to skip
+  drawing the characters' real-time shadows (saves GPU and CPU time on
+  slow machines). Scenery shadows are part of the scenery's textures and
+  cost nothing, so they stay.
+- **Smooth 60 FPS on any display:** the game's clock follows the display
+  when its refresh rate is a multiple of the game's (60, 120, 180, 240 Hz
+  and up), so every frame lands on its own refresh: no dropped frames or
+  judder in camera pans. Other refresh rates and G-SYNC / FreeSync use a
+  precise timer instead, automatically. Never tears.
+- **Fixed lines across the screen on the water** (Marine Race and other
+  water scenes, Native Renderer): native clears used a wrong stencil value.
+- **Fixed the corrupted lower half of the screen in the roulette payout**
+  (Native Renderer): draws without depth overwrote colour with depth data.
+- **Fixed a yellow tint in some water scenes** (Vulkan): a screen copy could
+  go into a smaller leftover texture and lose most of its rows.
+- **FPS overlay fix:** with the overlay on, the screen was redrawn at every
+  monitor refresh plus once per game frame (about 300 times a second on a
+  240 Hz display), taking GPU time from the game. It is now redrawn once per
+  game frame.
+- **Faster swimsuit menu and repeated screen copies (Native Renderer):**
+  when the game copies the same render target to the same texture again,
+  only the part that changed since is copied, and only those rows of the
+  texture are reloaded. Swimsuit menu GPU time: about -30% in tests at 4K.
+- **Lower CPU load in the renderer:** GPU register writes are processed in
+  batches, unchanged game memory is no longer re-copied to the graphics card
+  every frame, and a second CPU thread records and submits most of each
+  frame's GPU work (swimsuit menu: 4.1 -> 2.1 ms per frame in tests).
+- The log now lists the launch settings (graphics options) at startup, and
+  with MSAA Mode Off it no longer fills with "Incorrect resolve sample
+  selected" warnings.
+- **Native Renderer (experimental, on by default):** DX12 (Native) in the
+  Renderer setting.
   The renderer now follows the game's own render passes instead of only
   emulating the Xbox 360's EDRAM: the main 3D scene is drawn once instead
   of in two halves (about half the draw calls in 3D scenes), and clears are

@@ -37,6 +37,18 @@
 #include <windows.h>
 #include <timeapi.h>
 #pragma comment(lib, "winmm.lib")
+#include <shellapi.h>
+#pragma comment(lib, "shell32.lib")
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+// The diagnostic hotkeys are Windows only: they read as never pressed.
+constexpr int VK_F5 = 0x74, VK_F6 = 0x75, VK_F7 = 0x76, VK_F8 = 0x77;
+inline short GetAsyncKeyState(int) { return 0; }
+inline uint32_t GetCurrentThreadId() { return uint32_t(gettid()); }
+inline uint16_t _byteswap_ushort(uint16_t value) { return __builtin_bswap16(value); }
+inline uint32_t _byteswap_ulong(uint32_t value) { return __builtin_bswap32(value); }
+inline uint64_t _byteswap_uint64(uint64_t value) { return __builtin_bswap64(value); }
 #endif
 #include <vector>
 
@@ -126,6 +138,10 @@ REXCVAR_DEFINE_DOUBLE(doax2_native60_menu_window_scale, 3.0, "DOAX2",
                       "60 FPS: menu window pop in/out durations are multiplied by this (2 = original timing)");
 REXCVAR_DEFINE_DOUBLE(doax2_native60_menu_repeat_scale, 2.0, "DOAX2",
                       "60 FPS: held-direction menu auto-repeat delay/interval are multiplied by this (2 = original speed)");
+REXCVAR_DEFINE_INT32(doax2_shadow_quality, 3, "DOAX2",
+                     "Shadow map quality: 0 off (no caster draws), 1 low, 2 medium, 3 high");
+REXCVAR_DEFINE_BOOL(doax2_surface_log, false, "DOAX2",
+                    "Diagnostics: log D3D surface creation (sizes, callers)");
 REXCVAR_DEFINE_INT32(doax2_money_multiplier, 1, "DOAX2",
                      "Multiplies casino and minigame winnings (1 = original; 10, 15, 20 or 100)");
 REXCVAR_DEFINE_BOOL(doax2_native60_dev_keys, false, "DOAX2",
@@ -1740,7 +1756,16 @@ void ApplyNative60PhysicsStep(uint8_t* base) {
   DWORD ignored = 0;
   VirtualProtect(host, 4, old_protect, &ignored);
 #else
-  return;
+  // The host page can be larger than the guest's, with writable neighbours, so
+  // it stays writable afterwards.
+  const uintptr_t page_size = uintptr_t(sysconf(_SC_PAGESIZE));
+  void* page = reinterpret_cast<void*>(uintptr_t(base + kPhysicsStep) & ~(page_size - 1));
+  if (mprotect(page, page_size, PROT_READ | PROT_WRITE) != 0) {
+    failed = true;
+    REXLOG_INFO("DOAX2 native60 physics step: mprotect failed");
+    return;
+  }
+  REX_STORE_U32(kPhysicsStep, std::bit_cast<uint32_t>(kOriginal * scale));
 #endif
   REXLOG_INFO("DOAX2 native60 physics step scaled: {} -> {}", current,
               Native60LoadFloat(base, kPhysicsStep));
@@ -1762,6 +1787,8 @@ REX_HOOK_RAW(sub_82634EB0) {
 
 void ReportNative60HitWindows(uint8_t* base);
 void ReportNative60StaticRegions(uint8_t* base);
+// Set by the slide update hook on its first call (write watch trigger).
+std::atomic<bool> native60_slide_gameplay_started{false};
 #if defined(_WIN32)
 #include <tlhelp32.h>
 #include <dbghelp.h>
@@ -1887,8 +1914,6 @@ inline void Report() {
   }
 }
 }  // namespace native60_watch
-// Set by the slide update hook on its first call (write watch trigger).
-std::atomic<bool> native60_slide_gameplay_started{false};
 void Native60WriteWatchUpdate(uint8_t* base) {
   const std::string text = REXCVAR_GET(doax2_native60_write_watch);
   if (text.empty()) return;
@@ -1928,6 +1953,9 @@ void Native60WriteWatchUpdate(uint8_t* base) {
 }
 #else
 void Native60WriteWatchUpdate(uint8_t*) {}
+namespace native60_watch {
+inline std::atomic<bool> report_now{false};
+}  // namespace native60_watch
 #endif
 
 // Jet race intro pacing, applied once per update after the game step:
@@ -7582,7 +7610,9 @@ inline std::mutex mutex;
 inline std::map<uint32_t, std::string> names;  // handle -> file name
 inline std::map<uint32_t, std::chrono::steady_clock::time_point> started;
 inline std::set<uint32_t> skipped;
+#if defined(_WIN32)
 using XInputGetStateFn = DWORD(WINAPI*)(DWORD, void*);
+#endif
 inline bool SkipPressed() {
   // The pads exactly as the guest sees them (SDL drivers: any controller).
   if (rex::Runtime* runtime = rex::Runtime::instance()) {
@@ -8633,8 +8663,40 @@ DOAX2_PASS_HOOK(sub_82703438, 0x82703438)
 DOAX2_PASS_HOOK(sub_82703768, 0x82703768)
 DOAX2_PASS_HOOK(sub_82708CC0, 0x82708CC0)
 #undef DOAX2_PASS_HOOK
+// Shadow Quality (launcher): the shadow map pass is sub_8254F378 (binds the
+// 1024x1024 shadow target, viewport, light constants) ... caster draws ...
+// sub_8254FD08 (resolves the shadow textures); the depth clear is earlier
+// (sub_8254F040). Off skips the caster draws: the cleared shadow map reads as
+// fully lit.
+static thread_local int doax2_shadow_pass_depth = 0;
+REX_EXTERN(__imp__sub_8254F378);
+REX_HOOK_RAW(sub_8254F378) {
+  __imp__sub_8254F378(ctx, base);
+  ++doax2_shadow_pass_depth;
+}
+REX_EXTERN(__imp__sub_8254FD08);
+REX_HOOK_RAW(sub_8254FD08) {
+  doax2_shadow_pass_depth = 0;
+  __imp__sub_8254FD08(ctx, base);
+}
+// Diagnostics: surface creation (D3D CreateRenderTarget / depth surface).
+REX_EXTERN(__imp__sub_826F6CA0);
+REX_HOOK_RAW(sub_826F6CA0) {
+  const uint32_t caller = static_cast<uint32_t>(ctx.lr);
+  const uint32_t a[8] = {ctx.r3.u32, ctx.r4.u32, ctx.r5.u32, ctx.r6.u32,
+                         ctx.r7.u32, ctx.r8.u32, ctx.r9.u32, ctx.r10.u32};
+  __imp__sub_826F6CA0(ctx, base);
+  if (REXCVAR_GET(doax2_surface_log)) {
+    REXLOG_INFO("DOAX2 surface create: caller {:08X} r3-r10 {:08X} {:08X} {:08X} {:08X} {:08X} "
+                "{:08X} {:08X} {:08X} -> {:08X}",
+                caller, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], ctx.r3.u32);
+  }
+}
 REX_EXTERN(__imp__sub_826FA358);
 REX_HOOK_RAW(sub_826FA358) {
+  if (doax2_shadow_pass_depth && REXCVAR_GET(doax2_shadow_quality) <= 0) {
+    return;
+  }
   pass_trace.Draw();
   doax2_d3d_trace::Call(doax2_d3d_trace::kDrawIndexed, ctx, base);
   bool supply = false;
@@ -9088,6 +9150,25 @@ REX_HOOK_RAW(sub_8258E500) {
                 REXCVAR_GET(doax2_native60_mode3_gate_half),
                 REXCVAR_GET(doax2_native60_preview_motion_half),
                 REXCVAR_GET(doax2_time_source_probe));
+#if defined(_WIN32)
+  // The launch options (graphics settings) for tester logs; paths and key
+  // bindings left out.
+  static std::atomic<bool> options_logged{false};
+  if (!options_logged.exchange(true)) {
+    int argc = 0;
+    if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+      std::string options;
+      for (int i = 1; i < argc; ++i) {
+        const std::wstring arg = argv[i];
+        if (arg.find(L"_root=") != std::wstring::npos || arg.rfind(L"--keybind_", 0) == 0) continue;
+        for (wchar_t c : arg) options += c < 0x80 ? char(c) : '?';
+        options += ' ';
+      }
+      LocalFree(argv);
+      REXLOG_INFO("DOAX2 launch options: {}", options);
+    }
+  }
+#endif
   const uint32_t native60_index_before_sub_8258E500 = Native60SceneIndex(base);
   __imp__sub_8258E500(ctx, base);
   Native60SceneIndexCheck(base, "sub_8258E500", native60_index_before_sub_8258E500);
