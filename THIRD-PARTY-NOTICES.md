@@ -14,7 +14,9 @@ data, audio or video is in this repository or in its releases; you must
 provide your own copy of the game. The launcher uses a fan-made project logo;
 its background (`resources/launcher/background.jpg`) shows a Dead or Alive
 character, who belongs to Koei Tecmo and is not licensed under this project's
-license. This project is not affiliated with or
+license. The game logo at the top of the README
+(`resources/readme/doax2-logo.png`) also belongs to Koei Tecmo and is not
+licensed under this project's license. This project is not affiliated with or
 endorsed by Koei Tecmo or Microsoft.
 
 ## ReXGlue SDK
