@@ -5,7 +5,7 @@
 # DOAX2 Recomp
 
 We need testers! Please try DX12 or Vulkan, and simply upload your run logs as an issue to contribute to the project.
-A native Windows PC port of **Dead or Alive Xtreme 2** (Xbox 360), built with
+> A native Windows PC port of **Dead or Alive Xtreme 2** (Xbox 360), built with
 the [ReXGlue SDK](https://github.com/rexglue/rexglue-sdk) static
 recompiler. The game's PowerPC code is translated ahead of time into C++ and
 runs natively, at 30 FPS or at a native 60 FPS with the original game speed.
