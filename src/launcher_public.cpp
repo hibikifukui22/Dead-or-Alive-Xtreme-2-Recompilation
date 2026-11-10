@@ -48,7 +48,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.1.6";
+constexpr const wchar_t* kVersion = L"v1.1.7";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;
@@ -121,6 +121,9 @@ struct Settings {
   bool fps_overlay = false;
   bool diagnostics = false;
   bool keep_song = false;
+  bool hires_photos = true;  // full-resolution PNG copy of each in-game photo
+  bool photo_fxaa = false;         // FXAA pass on the saved PNG
+  bool photo_supersample = false;  // save at 1/1.5 of the render size, area-averaged
   int money_multiplier = 1;  // winnings x1 (original), x10, x15, x20, x100
   bool keyboard = true;
   std::array<std::array<std::string, 2>, kKeyActionCount> keys = [] {
@@ -137,7 +140,7 @@ struct Settings {
   }();
 };
 
-enum class Page { kMain, kSettings, kGraphics, kInput, kUpdate };
+enum class Page { kMain, kSettings, kGraphics, kInput, kUpdate, kPhotos };
 
 // Clickable areas, rebuilt on every paint; 'right' runs on a right click.
 struct HitArea {
@@ -159,6 +162,9 @@ bool g_status_error = false;
 std::unique_ptr<Bitmap> g_background;
 std::unique_ptr<Bitmap> g_logo;
 std::unique_ptr<Bitmap> g_controller;  // controller diagram on the Input page
+// Example photos on the Photo Settings page (shown in their own window).
+std::unique_ptr<Bitmap> g_example_supersample;
+std::unique_ptr<Bitmap> g_example_fxaa;
 // Key box waiting for a key press (Input page), or -1.
 int g_capture_action = -1;
 int g_capture_slot = 0;
@@ -288,6 +294,9 @@ Settings LoadSettings() {
   settings.fps_overlay = ReadBool(values, "fps_overlay", settings.fps_overlay);
   settings.diagnostics = ReadBool(values, "diagnostics", settings.diagnostics);
   settings.keep_song = ReadBool(values, "keep_song", settings.keep_song);
+  settings.hires_photos = ReadBool(values, "hires_photos", settings.hires_photos);
+  settings.photo_fxaa = ReadBool(values, "photo_fxaa", settings.photo_fxaa);
+  settings.photo_supersample = ReadBool(values, "photo_supersample", settings.photo_supersample);
   settings.money_multiplier = ReadInt(values, "money_multiplier", settings.money_multiplier);
   if (settings.money_multiplier != 10 && settings.money_multiplier != 15 && settings.money_multiplier != 20 &&
       settings.money_multiplier != 100)
@@ -334,6 +343,9 @@ void SaveSettings() {
          << "fps_overlay=" << (s.fps_overlay ? "true" : "false") << '\n'
          << "diagnostics=" << (s.diagnostics ? "true" : "false") << '\n'
          << "keep_song=" << (s.keep_song ? "true" : "false") << '\n'
+         << "hires_photos=" << (s.hires_photos ? "true" : "false") << '\n'
+         << "photo_fxaa=" << (s.photo_fxaa ? "true" : "false") << '\n'
+         << "photo_supersample=" << (s.photo_supersample ? "true" : "false") << '\n'
          << "money_multiplier=" << s.money_multiplier << '\n'
          << "keyboard=" << (s.keyboard ? "true" : "false") << '\n';
   for (size_t i = 0; i < kKeyActionCount; ++i)
@@ -638,6 +650,21 @@ void Launch(HWND window) {
       + L" --present_ui_with_guest_frames=true"
       + L" --doax2_native60_counter_scan=" + true_false(s.diagnostics)
       + L" --xmp_keep_song_across_playlists=" + true_false(s.keep_song)
+      // Photos: the camera reads the frame back from the GPU (without it
+      // photos and their thumbnails are garbage). "fast" copies each resolve
+      // back without waiting for the GPU (the CPU gets the previous copy);
+      // "full" waited on every resolve and halved the frame rate at 4K.
+      // Only the 1280x720 colour frame copy is read back: reading back every
+      // resolve hung the GPU on D3D12 (DEVICE_HUNG) when leaving the camera.
+      // Optionally a full-resolution PNG copy of each photo (the frame right
+      // after the shot, cropped to the photo's 3:2) goes to photos\, optionally
+      // with FXAA and/or supersampled to 1/1.5 of the render size.
+      + L" --readback_resolve=fast --readback_resolve_frame_only=true"
+      + L" --hires_resolve_capture=" + true_false(s.hires_photos)
+      + L" --hires_resolve_capture_aspect=1.5"
+      + L" --hires_resolve_capture_fxaa=" + true_false(s.photo_fxaa)
+      + L" --hires_resolve_capture_supersample=" + true_false(s.photo_supersample)
+      + L" --doax2_hires_photos=" + true_false(s.hires_photos)
       + L" --doax2_money_multiplier=" + std::to_wstring(s.money_multiplier)
       // Keyboard as a controller (merged with any connected pad); no mouse look.
       + L" --mnk_mode=" + true_false(s.keyboard) + L" --mnk_mouse=false";
@@ -965,7 +992,7 @@ std::filesystem::path UpdateTempFolder() {
 bool KeptByUpdate(const std::filesystem::path& relative) {
   if (relative.empty()) return true;
   const std::wstring first = relative.begin()->wstring();
-  for (const wchar_t* kept : {L"userdata", L"config", kGameFolder})
+  for (const wchar_t* kept : {L"userdata", L"config", L"photos", kGameFolder})
     if (_wcsicmp(first.c_str(), kept) == 0) return true;
   return false;
 }
@@ -1543,10 +1570,11 @@ void PaintMain(Graphics& g) {
   // Bottom middle: PLAY.
   DrawButton(g, RectF(566, 728, 468, 140), L"PLAY", 66, [] { Launch(nullptr); }, ButtonStyle::kAccent);
   // Right of PLAY: settings pages.
-  DrawButton(g, RectF(1070, 698, 470, 38), L"SETTINGS", 23, [] { g_page = Page::kSettings; });
-  DrawButton(g, RectF(1070, 742, 470, 38), L"GRAPHICS SETTINGS", 23, [] { g_page = Page::kGraphics; });
-  DrawButton(g, RectF(1070, 786, 470, 38), L"INPUT", 23, [] { g_page = Page::kInput; });
-  DrawButton(g, RectF(1070, 830, 470, 38), L"UPDATE", 23, [] {
+  DrawButton(g, RectF(1070, 692, 470, 34), L"SETTINGS", 22, [] { g_page = Page::kSettings; });
+  DrawButton(g, RectF(1070, 732, 470, 34), L"PHOTO SETTINGS", 22, [] { g_page = Page::kPhotos; });
+  DrawButton(g, RectF(1070, 772, 470, 34), L"GRAPHICS SETTINGS", 22, [] { g_page = Page::kGraphics; });
+  DrawButton(g, RectF(1070, 812, 470, 34), L"INPUT", 22, [] { g_page = Page::kInput; });
+  DrawButton(g, RectF(1070, 852, 470, 34), L"UPDATE", 22, [] {
     g_page = Page::kUpdate;
     // Opening the page is what starts the check (the only time the launcher goes online).
     const UpdateProgress u = UpdateSnapshot();
@@ -1776,13 +1804,14 @@ void PaintUpdate(Graphics& g) {
   }
 }
 
-void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& rows, const RowStyle& style) {
+void PaintSubPage(Graphics& g, const wchar_t* title, const std::vector<Row>& rows, const RowStyle& style,
+                  Page back = Page::kMain) {
   DrawLogo(g, 250);
   DrawText(g, title, RectF(300, 46, 1000, 56), 42, true, kWhite);
   const float top = 150;
   DrawPanel(g, RectF(150, top, 1300, style.height * float(rows.size()) + 24));
   DrawRows(g, rows, top + 12, style);
-  DrawButton(g, RectF(150, 812, 290, 76), L"‹  BACK", 33, [] { g_page = Page::kMain; });
+  DrawButton(g, RectF(150, 812, 290, 76), L"‹  BACK", 33, [back] { g_page = back; });
   DrawText(g, L"Changes are saved automatically.", RectF(460, 812, 990, 76), 21, false, kWhite,
            StringAlignmentFar);
 }
@@ -1828,7 +1857,109 @@ void PaintSettings(Graphics& g) {
        L"is one). Never share game files.",
        [](Graphics& g, const RectF& r) { DrawButton(g, r, L"OPEN LOGS FOLDER", 24, OpenLogsFolder); }},
   };
-  PaintSubPage(g, L"SETTINGS", rows, RowStyle{100, 36, 0, true});
+  PaintSubPage(g, L"SETTINGS", rows, RowStyle{86, 34, 0, true});
+}
+
+// A separate window with one example photo, scaled to fit (never enlarged past 1:1 more than the
+// screen allows). Closing it just closes it; several can be open at once.
+LRESULT CALLBACK ExampleWindowProcedure(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
+  if (message == WM_PAINT) {
+    PAINTSTRUCT ps;
+    HDC dc = BeginPaint(window, &ps);
+    RECT client{};
+    GetClientRect(window, &client);
+    Graphics g(dc);
+    g.Clear(Color(255, 4, 18, 44));
+    auto* bitmap = reinterpret_cast<Bitmap*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (bitmap) {
+      g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+      const float cw = float(client.right), ch = float(client.bottom);
+      const float fit = std::min(cw / float(bitmap->GetWidth()), ch / float(bitmap->GetHeight()));
+      const float w = float(bitmap->GetWidth()) * fit, h = float(bitmap->GetHeight()) * fit;
+      g.DrawImage(bitmap, RectF((cw - w) / 2, (ch - h) / 2, w, h));
+    }
+    EndPaint(window, &ps);
+    return 0;
+  }
+  if (message == WM_SIZE) {
+    InvalidateRect(window, nullptr, FALSE);
+    return 0;
+  }
+  if (message == WM_KEYDOWN && wparam == VK_ESCAPE) {
+    DestroyWindow(window);
+    return 0;
+  }
+  return DefWindowProcW(window, message, wparam, lparam);
+}
+
+void ShowExampleWindow(Bitmap* bitmap, const wchar_t* title) {
+  if (!bitmap) return;
+  static const wchar_t* const kClass = L"DOAX2RecompPhotoExample";
+  static bool registered = false;
+  HINSTANCE instance = GetModuleHandleW(nullptr);
+  if (!registered) {
+    WNDCLASSEXW window_class{sizeof(window_class)};
+    window_class.lpfnWndProc = ExampleWindowProcedure;
+    window_class.hInstance = instance;
+    window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    window_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_LAUNCHER_ICON));
+    window_class.hIconSm = window_class.hIcon;
+    window_class.lpszClassName = kClass;
+    registered = RegisterClassExW(&window_class) != 0;
+  }
+  // Image size (1:1), shrunk to 90% of the work area if needed.
+  RECT work{};
+  SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+  const float fit = std::min({1.0f, 0.9f * float(work.right - work.left) / float(bitmap->GetWidth()),
+                              0.9f * float(work.bottom - work.top) / float(bitmap->GetHeight())});
+  RECT r{0, 0, LONG(float(bitmap->GetWidth()) * fit), LONG(float(bitmap->GetHeight()) * fit)};
+  AdjustWindowRectEx(&r, WS_OVERLAPPEDWINDOW, FALSE, 0);
+  const int w = r.right - r.left, h = r.bottom - r.top;
+  const int x = work.left + std::max(0, int(work.right - work.left - w) / 2);
+  const int y = work.top + std::max(0, int(work.bottom - work.top - h) / 2);
+  HWND window = CreateWindowExW(0, kClass, title, WS_OVERLAPPEDWINDOW, x, y, w, h, g_window, nullptr,
+                                instance, nullptr);
+  if (!window) return;
+  SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(bitmap));
+  ShowWindow(window, SW_SHOW);
+  UpdateWindow(window);
+}
+
+// Toggle at the right of the control area with an EXAMPLE button on its left.
+void DrawToggleWithExample(Graphics& g, const RectF& r, bool* value, Bitmap* example, const wchar_t* title) {
+  DrawButton(g, RectF(r.X, r.Y, 172, r.Height), L"EXAMPLE", 22,
+             [example, title] { ShowExampleWindow(example, title); });
+  DrawToggle(g, ToggleRect(r), value);
+}
+
+void PaintPhotos(Graphics& g) {
+  Settings& s = g_settings;
+  std::vector<Row> rows = {
+      {L"Save Photos to PC",
+       L"Every photo you take with the in-game camera is also saved as a PNG at the game's full "
+       L"resolution (for example 2160 x 1440 at 2x Resolution Scale) in the photos folder next to "
+       L"this launcher, named by date and time.\n\n"
+       L"The in-game photo album is not changed and keeps its normal-size photos.",
+       [&s](Graphics& g, const RectF& r) { DrawToggle(g, ToggleRect(r), &s.hires_photos); }},
+      {L"Photo FXAA",
+       L"Runs an FXAA edge-smoothing pass on each saved photo, so thin details such as eyelashes "
+       L"and hair have smoother edges.\n\n"
+       L"It can make textures look slightly softer. It only changes the saved PNG, not the game.",
+       [&s](Graphics& g, const RectF& r) {
+         DrawToggleWithExample(g, r, &s.photo_fxaa, g_example_fxaa.get(), L"Photo FXAA - example");
+       }},
+      {L"Supersampled Photos",
+       L"Saves each photo at two thirds of the size the game renders, averaging the extra pixels for "
+       L"much smoother edges: 3x Resolution Scale (2160p) gives 2160 x 1440 photos, 2x (1440p) gives "
+       L"1440 x 960.\n\n"
+       L"Needs Resolution Scale 2x or higher; at 1x photos are saved at full size. With this and "
+       L"Photo FXAA off, photos are saved at full size and sharp.",
+       [&s](Graphics& g, const RectF& r) {
+         DrawToggleWithExample(g, r, &s.photo_supersample, g_example_supersample.get(),
+                               L"Supersampled Photos - example");
+       }},
+  };
+  PaintSubPage(g, L"PHOTO SETTINGS", rows, RowStyle{86, 34, 0, true});
 }
 
 void PaintGraphics(Graphics& g) {
@@ -1991,6 +2122,7 @@ void Paint(HWND window) {
       case Page::kGraphics: PaintGraphics(g); break;
       case Page::kInput: PaintInput(g); break;
       case Page::kUpdate: PaintUpdate(g); break;
+      case Page::kPhotos: PaintPhotos(g); break;
     }
     DrawInfoPopupOverlay(g);
   }
@@ -2188,6 +2320,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   g_background = LoadImageResource(IDR_LAUNCHER_BACKGROUND);
   g_logo = LoadImageResource(IDR_LAUNCHER_LOGO);
   g_controller = LoadImageResource(IDR_LAUNCHER_CONTROLLER);
+  g_example_supersample = LoadImageResource(IDR_LAUNCHER_PHOTO_SUPERSAMPLE);
+  g_example_fxaa = LoadImageResource(IDR_LAUNCHER_PHOTO_FXAA);
   g_settings = LoadSettings();
   CollectDisplayModes();
   if (!GameFilesPresent())
@@ -2230,6 +2364,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   }
   g_background_cache.reset();
   g_background.reset();
+  g_example_supersample.reset();
+  g_example_fxaa.reset();
   g_logo.reset();
   g_controller.reset();
   SDL_Quit();

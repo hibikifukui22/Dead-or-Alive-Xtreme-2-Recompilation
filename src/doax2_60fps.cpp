@@ -17,6 +17,8 @@
 #include "doax2_d3d_trace.h"
 
 #include <bit>
+#include <ctime>
+#include <string_view>
 #include <fstream>
 #include <chrono>
 #include <cmath>
@@ -60,6 +62,7 @@ inline uint64_t _byteswap_uint64(uint64_t value) { return __builtin_bswap64(valu
 #include <rex/runtime.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
+#include <rex/system/mmio_handler.h>
 #include <rex/system/xmemory.h>
 
 namespace {
@@ -1587,6 +1590,344 @@ void DumpNative60Census(uint8_t* base) {
 void DumpNative60Census(uint8_t*) {}
 #endif
 
+REXCVAR_DEFINE_BOOL(doax2_spike_scan, false, "DOAX2",
+                    "Diagnostic (slow): during relax scenes (screen 7), log guest floats that jump for "
+                    "exactly one game update and return (one-frame model flips)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+// One-update spike finder (pool relax floatie flip, 2026-11-09): the floatie
+// stands upright for single frames at both 30 and 60 FPS, on Vulkan and
+// D3D12. Every update during screen 7, each float word of the committed guest
+// heap and static data is compared over three updates: a spike is a value
+// that moved far from the previous update and back on the next one (the
+// neighbours agree). Words that spike on more than a third of the updates
+// (alternating values) are not reported.
+REXCVAR_DEFINE_STRING(doax2_spike_trace, "", "DOAX2",
+                      "Diagnostic: during relax scenes, log these guest floats every update "
+                      "(\"ADDR:WORDS,ADDR:WORDS\", hex address)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+void TraceSpikes(uint8_t* base) {
+  static std::vector<std::pair<uint32_t, uint32_t>> ranges;
+  static bool parsed = false;
+  if (!parsed) {
+    parsed = true;
+    const std::string spec = REXCVAR_GET(doax2_spike_trace);
+    size_t pos = 0;
+    while (pos < spec.size()) {
+      const size_t end = std::min(spec.find(',', pos), spec.size());
+      const std::string item = spec.substr(pos, end - pos);
+      const size_t colon = item.find(':');
+      if (colon != std::string::npos)
+        ranges.push_back({uint32_t(std::stoul(item.substr(0, colon), nullptr, 16)),
+                          uint32_t(std::stoul(item.substr(colon + 1)))});
+      pos = end + 1;
+    }
+  }
+  const int8_t screen = int8_t(REX_LOAD_U8(0x834BCFE0));
+  // Relax (7): every update; other screens: once per second.
+  static uint64_t ticks = 0;
+  if (ranges.empty() || (screen != 7 && ++ticks % 60 != 0)) return;
+  static uint64_t lines = 0;
+  if (++lines > 4000) return;
+  std::string text;
+  for (const auto& [guest, words] : ranges) {
+    text += fmt::format(" [{:08X}]", guest);
+    for (uint32_t i = 0; i < words; ++i)
+      text += screen == 7 ? fmt::format(" {:.4f}", std::bit_cast<float>(REX_LOAD_U32(guest + i * 4)))
+                          : fmt::format(" {:X}", REX_LOAD_U32(guest + i * 4));
+  }
+  REXLOG_INFO("DOAX2 spike trace: frame={} screen={}{}", Doax2EngineFrameCount(), screen, text);
+}
+
+REXCVAR_DEFINE_BOOL(doax2_fix_gimbal_flip, true, "DOAX2",
+                    "Fix one-frame model flips (floatie standing upright in relax scenes): snap "
+                    "animation rotations that sit exactly on the 90-degree edge to the game's special case");
+
+// Floatie flip (pool relax, 2026-11-09; same at 30/60 FPS, Vulkan and D3D12).
+// 825A57F8 samples a rotation track with 825A4E78 (keyframe angles -> sin/cos
+// -> quaternion via vmsum4fp128 dot products) and turns the quaternion back
+// into angles (825A5AA0..825A5C30). It takes a gimbal-lock special case when
+// f30 = 1 - 2(x^2 + y^2) (or f29 = 1 - 2(x^2 + z^2)) is exactly 0.0. The
+// floatie's track gives q = (a, b, a, b): exactly on that edge, so the last
+// bit of rounding decides. The dot products run as x86 DPPS here (its own
+// summation order and rounding). Trace (log 214, fix off): every flip update
+// had f30 exactly 0 (81 of 81); the other updates had f30 = +-6e-8..2e-7
+// and the correct pose. The special case returns (-pi/2, -pi/2, -z) instead
+// of (0, pi/2, z), whose matrix stands the floatie up for that frame. So a
+// quaternion whose guest single-precision sum is exactly 0.5 is moved one or
+// two ulps (invisible) so the sum lands just below 0.5 (f30 > 0, the case
+// seen on the correct updates).
+namespace gimbal_fix {
+inline float SumSquares(float a, float b) { return float(float(b * b) + float(a * a)); }
+// Shrinks |v| by ulps until SumSquares(u, v) < 0.5f; false if not needed.
+inline bool Snap(float u, float& v) {
+  if (SumSquares(u, v) != 0.5f || v == 0.0f) return false;
+  float t = v;
+  for (int i = 0; i < 16; ++i) {
+    t = std::nextafter(t, 0.0f);
+    if (SumSquares(u, t) < 0.5f) { v = t; return true; }
+  }
+  return false;
+}
+inline void Apply(uint8_t* base, uint32_t q) {
+  float x = std::bit_cast<float>(REX_LOAD_U32(q)), y = std::bit_cast<float>(REX_LOAD_U32(q + 4));
+  float z = std::bit_cast<float>(REX_LOAD_U32(q + 8)), w = std::bit_cast<float>(REX_LOAD_U32(q + 12));
+  // Only the f30 edge was observed; the f29 one (x^2 + z^2) is left alone.
+  const float x0 = x, y0 = y;
+  if (!Snap(x, y) && !Snap(y, x)) return;
+  // Keep the track's symmetry (w == y, z == x) when it was there.
+  if (w == y0) w = y;
+  if (z == x0) z = x;
+  REX_STORE_U32(q, std::bit_cast<uint32_t>(x));
+  REX_STORE_U32(q + 4, std::bit_cast<uint32_t>(y));
+  REX_STORE_U32(q + 8, std::bit_cast<uint32_t>(z));
+  REX_STORE_U32(q + 12, std::bit_cast<uint32_t>(w));
+  static std::atomic<uint64_t> snapped{0};
+  const uint64_t n = snapped.fetch_add(1) + 1;
+  if (n <= 3 || n % 10000 == 0) REXLOG_INFO("DOAX2 gimbal flip fix: snapped rotation (count {})", n);
+}
+}  // namespace gimbal_fix
+
+// High-resolution photos (launcher option): when the game writes a photo
+// (82411360 opens "<root>:\photodata.ptc" for writing and writes buffer
+// 82E96CA0 + index * 1 MB, index at 83296D30), the GPU's full-resolution copy
+// of the photo resolve (hires_resolve_capture, kept by every renderer's
+// readback path) is saved as <game folder>\photos\<girl>\<date>.png. The
+// photo data ("PTC+MSHM") holds the girl at +0x14; the order is the game's
+// name table at 0x823BD884 (UTF-16): Zack, Kokoro, Christie, Lisa, Hitomi,
+// Ayane, Leifang, Helena, Kasumi, Tina (Kokoro = 1 checked against photos
+// and her money slot).
+REXCVAR_DEFINE_BOOL(doax2_hires_photos, false, "DOAX2",
+                    "Also save each in-game photo as a full-resolution PNG in photos\\<girl>\\")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+namespace hires_photos {
+inline std::filesystem::path GameFolder() {
+#if defined(_WIN32)
+  wchar_t module[MAX_PATH]{};
+  GetModuleFileNameW(nullptr, module, MAX_PATH);
+  // <game folder>\out\game\doax2.exe
+  return std::filesystem::path(module).parent_path().parent_path().parent_path();
+#else
+  return std::filesystem::current_path();
+#endif
+}
+// Photos go straight into <game>\photos: the photo data names the player (+0x14), not the
+// girl in the shot, so per-girl folders were dropped.
+inline void Request(uint8_t* base) {
+  const uint32_t index = REX_LOAD_U32(0x83296D30);
+  if (index > 8) return;
+  const uint32_t buffer = 0x82E96CA0 + (index << 20);
+  if (REX_LOAD_U32(buffer) != 0x5054432B) return;  // "PTC+"
+  const auto now = std::chrono::system_clock::now();
+  const std::time_t t = std::chrono::system_clock::to_time_t(now);
+  std::tm local{};
+#if defined(_WIN32)
+  localtime_s(&local, &t);
+#else
+  localtime_r(&t, &local);
+#endif
+  const auto folder = GameFolder() / "photos";
+  const std::string stamp = fmt::format("{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", local.tm_year + 1900,
+                                        local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min,
+                                        local.tm_sec);
+  auto path = folder / (stamp + ".png");
+  for (int n = 2; std::filesystem::exists(path) && n < 100; ++n) path = folder / fmt::format("{}_{}.png", stamp, n);
+  static int request = 0;
+  const auto u8 = path.u8string();
+  rex::cvar::SetFlagByName("hires_resolve_capture_path", std::string(u8.begin(), u8.end()));
+  rex::cvar::SetFlagByName("hires_resolve_capture_request", std::to_string(++request));
+  REXLOG_INFO("DOAX2 photo: -> {}", std::string(u8.begin(), u8.end()));
+}
+}  // namespace hires_photos
+// The shot: 824110C0 converts the frame (a 1280 x 720 resolve) into the photo
+// and encodes it (8286FAE0 writes the "PTC+MSHM" data). Arm the GPU's
+// full-resolution capture of the next frame resolve here; the save below
+// writes it out.
+REX_EXTERN(__imp__sub_824110C0);
+REX_HOOK_RAW(sub_824110C0) {
+  if (REXCVAR_GET(doax2_hires_photos)) {
+    static int32_t arm = 1000;
+    rex::cvar::SetFlagByName("hires_resolve_capture_arm", std::to_string(++arm));
+  }
+  __imp__sub_824110C0(ctx, base);
+}
+REX_EXTERN(__imp__sub_82411360);
+REX_HOOK_RAW(sub_82411360) {
+  std::string path;
+  for (uint32_t i = 0; ctx.r3.u32 && i < 260; ++i) {
+    const char c = char(REX_LOAD_U8(ctx.r3.u32 + i));
+    if (!c) break;
+    path += c;
+  }
+  __imp__sub_82411360(ctx, base);
+  constexpr std::string_view kPhoto = "photodata.ptc";
+  if (REXCVAR_GET(doax2_hires_photos) && ctx.r3.u32 != 0 && path.size() >= kPhoto.size() &&
+      path.compare(path.size() - kPhoto.size(), kPhoto.size(), kPhoto) == 0)
+    hires_photos::Request(base);
+}
+
+// libjpeg error_exit (jpeg_std_error table filled by 827D11F0): logs the
+// library's message (photo album decode, 2026-11-09). The guest handler
+// prints, destroys the decompressor and returns, which crashes libjpeg next.
+REX_EXTERN(__imp__sub_827D0FB8);
+REX_HOOK_RAW(sub_827D0FB8) {
+  const uint32_t cinfo = ctx.r3.u32;
+  const uint32_t err = REX_LOAD_U32(cinfo);
+  const int32_t code = int32_t(REX_LOAD_U32(err + 20));
+  const uint32_t table = REX_LOAD_U32(err + 112);
+  std::string message;
+  if (table && code >= 0 && code < 200) {
+    const uint32_t text = REX_LOAD_U32(table + code * 4);
+    for (uint32_t i = 0; text && i < 120; ++i) {
+      const char ch = char(REX_LOAD_U8(text + i));
+      if (!ch) break;
+      message += ch;
+    }
+  }
+  const uint32_t src = REX_LOAD_U32(cinfo + 24);
+  const uint32_t next = src ? REX_LOAD_U32(src) : 0, left = src ? REX_LOAD_U32(src + 4) : 0;
+  std::string bytes;
+  for (uint32_t i = 0; next && i < 16 && i < left; ++i) bytes += fmt::format(" {:02X}", REX_LOAD_U8(next + i));
+  REXLOG_ERROR("DOAX2 libjpeg error: code={} \"{}\" parm={} {} src next={:08X} left={} bytes:{} lr={:08X}", code,
+               message, int32_t(REX_LOAD_U32(err + 24)), int32_t(REX_LOAD_U32(err + 28)), next, left, bytes,
+               uint32_t(ctx.lr));
+  __imp__sub_827D0FB8(ctx, base);
+}
+
+
+// Animation track sampler used by 825A57F8 for the rotation it turns into
+// angles (floatie flip): r3 = out quaternion, f1 = time, r4/r5/r6 = track.
+REX_EXTERN(__imp__sub_825A4E78);
+REX_HOOK_RAW(sub_825A4E78) {
+  const bool trace = !REXCVAR_GET(doax2_spike_trace).empty() && int8_t(REX_LOAD_U8(0x834BCFE0)) == 7;
+  const uint32_t out = ctx.r3.u32, r4 = ctx.r4.u32, r5 = ctx.r5.u32, r6 = ctx.r6.u32;
+  const double t = ctx.f1.f64;
+  const uint64_t lr = ctx.lr;
+  __imp__sub_825A4E78(ctx, base);
+  // Only the call in 825A57F8 that feeds the quaternion -> angles conversion.
+  if (uint32_t(lr) == 0x825A5A9C && REXCVAR_GET(doax2_fix_gimbal_flip)) gimbal_fix::Apply(base, out);
+  static uint64_t lines = 0;
+  if (trace && ++lines <= 6000) {
+    const float x = std::bit_cast<float>(REX_LOAD_U32(out)), y = std::bit_cast<float>(REX_LOAD_U32(out + 4)),
+                z = std::bit_cast<float>(REX_LOAD_U32(out + 8));
+    REXLOG_INFO("DOAX2 sampler: frame={} lr={:08X} r4={:08X} r6={} t={:.6f} q={:08X} {:08X} {:08X} {:08X} "
+                "f30={:.3e} f29={:.3e}",
+                Doax2EngineFrameCount(), uint32_t(lr), r4, r6, t, REX_LOAD_U32(out), REX_LOAD_U32(out + 4),
+                REX_LOAD_U32(out + 8), REX_LOAD_U32(out + 12), 1.0f - 2.0f * gimbal_fix::SumSquares(x, y),
+                1.0f - 2.0f * gimbal_fix::SumSquares(x, z));
+  }
+}
+
+REXCVAR_DEFINE_INT32(doax2_girl_probe, -2, "DOAX2",
+                     "Diagnostic: -1 log the game state fields 82E225E4/82E225E8 (+7500/+7504 of 82E20798) "
+                     "once per second; >= 0 also write that value to +7504")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+void GirlProbe(uint8_t* base) {
+  const int32_t mode = REXCVAR_GET(doax2_girl_probe);
+  if (mode == -2) return;
+  static uint64_t n = 0;
+  if (mode == -3) {  // hires capture self-test: save the newest capture every 5 s
+    if (++n % 300 == 280) {
+      static int32_t arm = 5000;
+      rex::cvar::SetFlagByName("hires_resolve_capture_arm", std::to_string(++arm));
+    }
+    if (n % 300 == 0) {
+      static int request = 0;
+      rex::cvar::SetFlagByName("hires_resolve_capture_path", fmt::format("photos/test/frame_{}.png", n / 300));
+      rex::cvar::SetFlagByName("hires_resolve_capture_request", std::to_string(++request));
+    }
+    return;
+  }
+  if (mode >= 0) REX_STORE_U32(0x82E225E8, uint32_t(mode));
+  if (++n % 60 == 0)
+    REXLOG_INFO("DOAX2 girl probe: +7500={} +7504={} screen={}", int32_t(REX_LOAD_U32(0x82E225E4)),
+                int32_t(REX_LOAD_U32(0x82E225E8)), int32_t(int8_t(REX_LOAD_U8(0x834BCFE0))));
+}
+
+void ScanSpikes(uint8_t* base) {
+  GirlProbe(base);
+  TraceSpikes(base);
+#if defined(_WIN32)
+  if (!REXCVAR_GET(doax2_spike_scan)) return;
+  struct Region { uint32_t guest, words, offset; };
+  static std::vector<Region> regions;
+  static std::vector<uint32_t> snaps[3];
+  static std::vector<uint16_t> spikes;
+  static std::vector<uint32_t> last_spike;
+  static uint32_t updates = 0, filled = 0, cur = 0, reports = 0;
+  const bool relax = int8_t(REX_LOAD_U8(0x834BCFE0)) == 7;
+  auto report = [&] {
+    if (updates < 30) return;
+    struct Hit { uint32_t addr; uint16_t n; };
+    std::vector<Hit> hits;
+    for (const Region& r : regions)
+      for (uint32_t i = 0; i < r.words; ++i) {
+        const uint16_t n = spikes[r.offset + i];
+        if (n >= 3 && n * 3 <= updates) hits.push_back({r.guest + i * 4, n});
+      }
+    std::sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) { return a.n > b.n; });
+    REXLOG_INFO("DOAX2 spike scan: report {} updates={} words_with_spikes={}", ++reports, updates, hits.size());
+    for (size_t k = 0; k < hits.size() && k < 250; ++k) {
+      const uint32_t v = REX_LOAD_U32(hits[k].addr);
+      REXLOG_INFO("DOAX2 spike scan: addr={:08X} spikes={} now={}", hits[k].addr, hits[k].n,
+                  std::bit_cast<float>(v));
+    }
+  };
+  if (!relax) {
+    if (filled) report();
+    filled = 0;
+    updates = 0;
+    return;
+  }
+  if (!filled) {
+    regions.clear();
+    uint64_t total = 0;
+    for (uint64_t guest = 0x40000000; guest < 0xA0000000;) {
+      MEMORY_BASIC_INFORMATION info{};
+      if (!VirtualQuery(base + guest, &info, sizeof(info))) break;
+      const uint64_t start = uint64_t(reinterpret_cast<uint8_t*>(info.BaseAddress) - base);
+      const uint64_t end = std::min<uint64_t>(start + info.RegionSize, 0xA0000000);
+      // 70000000-7FFFFFFF: guest thread stacks (temporaries, not state).
+      const bool stack = start >= 0x70000000 && start < 0x80000000;
+      if (!stack && info.State == MEM_COMMIT && (info.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+          !(info.Protect & PAGE_GUARD) && end > guest) {
+        const uint64_t from = std::max<uint64_t>(start, guest);
+        regions.push_back({uint32_t(from), uint32_t((end - from) / 4), uint32_t(total / 4)});
+        total += end - from;
+      }
+      guest = std::max<uint64_t>(end, guest + 0x1000);
+    }
+    REXLOG_INFO("DOAX2 spike scan: {} regions, {} MB", regions.size(), total >> 20);
+    if (total > (1ull << 30)) regions.clear();
+    for (auto& s : snaps) s.resize(total / 4);
+    spikes.assign(total / 4, 0);
+  }
+  cur = (cur + 1) % 3;
+  std::vector<uint32_t>& c = snaps[cur];
+  for (const Region& r : regions)
+    std::memcpy(c.data() + r.offset, base + r.guest, size_t(r.words) * 4);
+  ++filled;
+  if (filled < 3) return;
+  ++updates;
+  const std::vector<uint32_t>& b = snaps[(cur + 2) % 3];
+  const std::vector<uint32_t>& a = snaps[(cur + 1) % 3];
+  const size_t n = c.size();
+  for (size_t i = 0; i < n; ++i) {
+    const uint32_t vb = b[i];
+    if (vb == a[i] || vb == c[i]) continue;
+    const float fa = std::bit_cast<float>(std::byteswap(a[i])), fb = std::bit_cast<float>(std::byteswap(vb)),
+                fc = std::bit_cast<float>(std::byteswap(c[i]));
+    if (!std::isfinite(fa) || !std::isfinite(fb) || !std::isfinite(fc)) continue;
+    const float mag = std::max({std::fabs(fa), std::fabs(fc), 1e-3f});
+    if (mag > 1e4f) continue;
+    const float jump = std::min(std::fabs(fb - fa), std::fabs(fb - fc));
+    if (jump > 0.25f * mag + 0.05f && std::fabs(fa - fc) < 0.1f * jump && spikes[i] < 65535) ++spikes[i];
+  }
+  if (updates % 600 == 0) report();
+#endif
+}
+
 // Per-update counter finder. With the base speed scaled, step-driven timers
 // move by +-0.5 per update; anything still moving by exactly +-1 per update
 // (integer or float) is a fixed-step counter that runs at double speed.
@@ -1951,6 +2292,60 @@ void Native60WriteWatchUpdate(uint8_t* base) {
   }
   if (++updates % 300 == 0 || native60_watch::report_now.exchange(false)) native60_watch::Report();
 }
+
+// Diagnostic: on an access violation, log the host call chain (recompiled
+// guest functions are named sub_XXXXXXXX), so a crash names its caller
+// (photo album freeze, 2026-11-09). Needs doax2.pdb next to doax2.exe.
+REXCVAR_DEFINE_BOOL(doax2_crash_stack, false, "DOAX2",
+                    "Diagnostic: log the call chain of access violations (needs doax2.pdb)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+namespace crash_stack {
+inline std::atomic<int> logged{0};
+inline uintptr_t membase = 0;
+inline LONG CALLBACK Handler(PEXCEPTION_POINTERS info) {
+  if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+  // Only guest null-page accesses (the memory system uses access violations
+  // for write tracking elsewhere).
+  const uintptr_t target = uintptr_t(info->ExceptionRecord->ExceptionInformation[1]);
+  if (target < membase || target >= membase + 0x10000) return EXCEPTION_CONTINUE_SEARCH;
+  if (logged.fetch_add(1) >= 4) return EXCEPTION_CONTINUE_SEARCH;
+  static std::once_flag sym_once;
+  std::call_once(sym_once, [] {
+    char module[MAX_PATH]{};
+    GetModuleFileNameA(nullptr, module, MAX_PATH);
+    std::string dir(module);
+    dir = dir.substr(0, dir.find_last_of("\\/"));
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymInitialize(GetCurrentProcess(), dir.c_str(), TRUE);
+  });
+  CONTEXT c = *info->ContextRecord;
+  std::string text;
+  for (int i = 0; i < 16 && c.Rip; ++i) {
+    text += " <- " + native60_watch::Symbol(uintptr_t(c.Rip));
+    DWORD64 image = 0;
+    PRUNTIME_FUNCTION fn = RtlLookupFunctionEntry(c.Rip, &image, nullptr);
+    if (!fn) {
+      c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp);
+      c.Rsp += 8;
+    } else {
+      void* handler_data = nullptr;
+      DWORD64 frame = 0;
+      RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, c.Rip, fn, &c, &handler_data, &frame, nullptr);
+    }
+  }
+  REXLOG_ERROR("DOAX2 crash stack: access violation {} {:016X}:{}",
+               info->ExceptionRecord->ExceptionInformation[0] ? "write" : "read",
+               uint64_t(info->ExceptionRecord->ExceptionInformation[1]), text);
+  return EXCEPTION_CONTINUE_SEARCH;
+}
+inline void Install(uint8_t* base) {
+  static std::once_flag once;
+  std::call_once(once, [base] {
+    membase = uintptr_t(base);
+    AddVectoredExceptionHandler(1, Handler);
+  });
+}
+}  // namespace crash_stack
 #else
 void Native60WriteWatchUpdate(uint8_t*) {}
 namespace native60_watch {
@@ -3982,6 +4377,10 @@ void ReportNative60GameStep(uint8_t* base) {
     const uint32_t object = objects && index < 8 ? objects + index * 4144 : 0;
     ScanNative60Counters(base, object ? REX_LOAD_U32(object + 3580) : 0, index);
   }
+  ScanSpikes(base);
+#if defined(_WIN32)
+  if (REXCVAR_GET(doax2_crash_stack)) crash_stack::Install(base);
+#endif
   ReportNative60CameraState(base);
   if (float(REXCVAR_GET(doax2_native60_tick_scale)) == 1.0f) return;
   static uint64_t frames = 0;
@@ -5616,8 +6015,8 @@ DOAX2_NATIVE60_POS_PROBE(sub_82410D20)
 DOAX2_NATIVE60_POS_PROBE(sub_82410D68)
 DOAX2_NATIVE60_POS_PROBE(sub_82410DC8)
 DOAX2_NATIVE60_POS_PROBE(sub_82410E48)
-DOAX2_NATIVE60_POS_PROBE(sub_824110C0)
-DOAX2_NATIVE60_POS_PROBE(sub_82411360)
+// sub_824110C0 (photo shot) has its own hook (hires_photos).
+// sub_82411360 (photo file write) has its own hook (hires_photos).
 DOAX2_NATIVE60_POS_PROBE(sub_82411438)
 DOAX2_NATIVE60_POS_PROBE(sub_82411690)
 DOAX2_NATIVE60_POS_PROBE(sub_82411760)
@@ -7372,9 +7771,21 @@ REX_HOOK_RAW(sub_82640B70) {
 // twice as fast: the steering pole dropped 1.8 s before the girls' hands
 // in the jet intro (logs 306/307). During the jet race the steps are
 // halved (remainders carried).
+REXCVAR_DECLARE(int32_t, doax2_girl_probe);
 REX_HOOK_RAW(sub_82513930) {
   const uint32_t character = ctx.r3.u32;
   Native60NoteCharacter(character);
+  if (REXCVAR_GET(doax2_girl_probe) == -1) {
+    static std::set<uint32_t> dumped;
+    static std::mutex m;
+    std::lock_guard lock(m);
+    if (dumped.size() < 8 && dumped.insert(character).second) {
+      std::string text;
+      for (uint32_t i = 0; i < 48; ++i) text += fmt::format(" {:X}", REX_LOAD_U32(character + i * 4));
+      REXLOG_INFO("DOAX2 girl probe character {:08X} screen={}:{}", character,
+                  int32_t(int8_t(REX_LOAD_U8(0x834BCFE0))), text);
+    }
+  }
   if (float(REXCVAR_GET(doax2_native60_tick_scale)) != 0.5f || !Native60JetRaceActive()) {
     __imp__sub_82513930(ctx, base);
     return;
@@ -8998,13 +9409,25 @@ REX_HOOK_RAW(sub_8258C910) {
 
   if (REXCVAR_GET(doax2_engine_60fps)) {
     ++frame_count;
-    if (frame_count % 300 == 0) {
-      const auto now = std::chrono::steady_clock::now();
-      const double elapsed = std::chrono::duration<double>(now - rate_window_start).count();
+    static uint64_t rate_window_first_frame = 0;
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - rate_window_start).count();
+    const uint64_t rate_window_frames = frame_count - rate_window_first_frame;
+    if (rate_window_frames >= 300 || elapsed >= 5.0) {
       if (elapsed > 0.0) {
         REXLOG_INFO("DOAX2 engine frame rate: {:.1f} FPS ({} frames / {:.2f} s)",
-                    300.0 / elapsed, 300, elapsed);
+                    rate_window_frames / elapsed, rate_window_frames, elapsed);
       }
+      static uint64_t last_faults = 0, last_fault_us = 0;
+      const uint64_t faults = rex::runtime::MMIOHandler::watch_fault_count();
+      const uint64_t fault_us = rex::runtime::MMIOHandler::watch_fault_microseconds();
+      REXLOG_INFO("DOAX2 memory watch faults: {:.1f} per frame, {:.2f} ms per frame",
+                  double(faults - last_faults) / double(std::max<uint64_t>(rate_window_frames, 1)),
+                  double(fault_us - last_fault_us) / 1000.0 /
+                      double(std::max<uint64_t>(rate_window_frames, 1)));
+      last_faults = faults;
+      last_fault_us = fault_us;
+      rate_window_first_frame = frame_count;
       rate_window_start = now;
     }
   }
@@ -9273,11 +9696,17 @@ REX_HOOK_RAW(sub_8258E0D8) {
 
   RecordStage(timing_render_present, start);
   ++timing_frames;
-  if (timing_frames % 300 != 0) {
+  static uint64_t timing_window_first_frame = 0;
+  static auto timing_window_start = std::chrono::steady_clock::now();
+  const auto timing_now = std::chrono::steady_clock::now();
+  const uint64_t timing_window_frames = timing_frames - timing_window_first_frame;
+  if (timing_window_frames < 300 && timing_now - timing_window_start < std::chrono::seconds(5)) {
     return;
   }
+  timing_window_first_frame = timing_frames;
+  timing_window_start = timing_now;
 
-  constexpr double kWindowFrames = 300.0;
+  const double kWindowFrames = double(timing_window_frames);
   REXLOG_INFO(
       "DOAX2 frame stages (avg/max ms): timing {:.2f}/{:.2f}, update "
       "{:.2f}/{:.2f}, render+present {:.2f}/{:.2f}, guest present "

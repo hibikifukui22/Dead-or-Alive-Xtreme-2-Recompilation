@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.1.7
+
+- **Fixed the in-game camera:** photos taken in relax scenes were not
+  saved, and opening the photo album (Precious Memories) froze the game.
+  Photos now save and show correctly, with their album thumbnails, and the
+  album opens. The camera's frame and the 64x64 album thumbnail are read
+  back from the graphics card; nothing else is, so it costs no FPS (reading
+  back every screen copy halved the frame rate at 4K and could hang the GPU
+  on DX12 when leaving the camera). The album freeze came from two game
+  functions the recompiler had missed and from the game's JPEG error
+  handling (setjmp / longjmp) not being supported.
+- **Photo Settings** (new page on the main screen):
+  - **Save Photos to PC** (on by default): every photo is also saved as a
+    PNG at the game's full resolution (for example 3240 x 2160 at 3x
+    Resolution Scale, cropped to the photo's 3:2) in the photos folder next
+    to the launcher, named by date and time. The album keeps its
+    normal-size photos.
+  - **Photo FXAA** (off by default): an FXAA pass on the saved PNG for
+    smoother thin details (eyelashes, hair); can soften textures slightly.
+  - **Supersampled Photos** (off by default): saves at two thirds of the
+    render size, averaging the extra pixels (3x -> 2160 x 1440, 2x ->
+    1440 x 960); needs Resolution Scale 2x or higher.
+  - EXAMPLE buttons show what each option looks like. All processing runs
+    while saving, not in the game.
+- **Fixed the girl flipping over on the long floatie** (pool relax scene,
+  and any scene where a girl lies on it): an exact 90-degree pitch made the
+  game's angle conversion flip the model between two equal readings every
+  few frames.
+- **Graphics device loss is now logged:** if the graphics driver resets,
+  the log now records the reason before the game closes, so these crashes
+  can be diagnosed.
+- Updates through the launcher never touch the photos folder.
+
 ## 1.1.6
 
 - **Renderer setting with a new Vulkan renderer (experimental)** (Graphics):

@@ -8,6 +8,12 @@ game_root = "game"
 [entrypoint]
 file_path = "game/default.xex"
 out_directory_path = "generated/default"
+# Guest setjmp/longjmp (photo album freeze, 2026-11-09): D3DX's image loader
+# 827931D8 calls setjmp 829F12D0 before libjpeg; its error handler 82790630
+# calls longjmp 829F1080(err + 144, 1). D3DX tries libjpeg first on the PNG
+# photo thumbnails; unhandled, longjmp returned with a corrupted stack.
+setjmp_address = 0x829F12D0
+longjmp_address = 0x829F1080
 includes = ["config/startup-functions.toml", "config/fibers.toml"]
 
 # Direct tail-call targets missed by automatic discovery. Let the scanner
@@ -43,3 +49,17 @@ includes = ["config/startup-functions.toml", "config/fibers.toml"]
 # table entries audited; 0x8244EF10 was the only missing one.
 0x8244EEF8 = { size = 0x18 }
 0x8244EF10 = {}
+# Photo album freeze (log 218, 2026-11-09): "Call to invalid or unregistered
+# function at guest address 0x827D11D8" when opening Precious Memories with
+# saved photos. 0x827D11F0 fills a 5-callback table at runtime (+0..+16:
+# 827D0FB8, 827D1038, 827D1008, 827D10C8, 827D11D8; JPEG decoder input
+# callbacks). The first four were discovered; 827D11D8 (6 instructions,
+# lwz/li/stw/lwz/stw/blr) was the only missing one.
+0x827D11D8 = { size = 0x18 }
+# Photo album, next step (log after the setjmp fix): "Call to invalid or
+# unregistered function at guest address 0x82422838". Callback table
+# 0x82D79EB8..0x82D79F80 (51 entries) audited: 0x82422838 (entry at
+# 0x82D79F24) was the only missing one; the scanner absorbed it into the end
+# of 0x82421CF8, so that function is bounded at 0x82422838.
+0x82421CF8 = { size = 0xB40 }
+0x82422838 = { size = 0x40 }
