@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.8
+
+- **Fixed saves being overwritten when you have more than 62 album photos:**
+  at startup the game looks for its save in one list of 64 items that also
+  holds the album photos. The photos came first, so with more than 62 of
+  them the save was left off the list, the game decided there was no save
+  and created a new, empty one over it. The save files are now always listed
+  first, then the photos newest first. Existing photos are kept.
+- **Automatic save backup:** every time the launcher opens it copies
+  `userdata` (saves, album photos, achievements; not the shader cache) to a
+  `save-backup` folder next to the launcher, replacing the previous backup.
+- **Fixed album thumbnails on Vulkan** (issue #13): every thumbnail showed
+  the first photo, or came out black, and the full-resolution PNG was not
+  saved. At 3x Resolution Scale Vulkan keeps its upscaled screen copies in
+  one buffer of about 4.5 GB, and copies stored past the 4 GB mark could
+  not be read back. The camera frame and the album thumbnail are now also
+  always copied in full rather than skipped or trimmed as "unchanged".
+- **No stutter when taking photos:** with Save Photos to PC on, the
+  full-resolution image was untiled and cropped on the graphics thread,
+  holding one frame for about 50 ms (3 dropped frames). Only a memory copy
+  is left there now (about 10-15 ms in total per photo); the rest runs on
+  the PNG writer thread.
+
 ## 1.1.7
 
 - **Fixed the in-game camera:** photos taken in relax scenes were not

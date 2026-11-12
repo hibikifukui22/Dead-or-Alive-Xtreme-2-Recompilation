@@ -48,7 +48,7 @@ namespace {
 
 using namespace Gdiplus;
 
-constexpr const wchar_t* kVersion = L"v1.1.7";
+constexpr const wchar_t* kVersion = L"v1.1.8";
 constexpr const wchar_t* kGameFolder = L"extracted game files here";
 constexpr float kDesignW = 1600.0f;  // design space (window opens at this client size)
 constexpr float kDesignH = 900.0f;
@@ -992,7 +992,7 @@ std::filesystem::path UpdateTempFolder() {
 bool KeptByUpdate(const std::filesystem::path& relative) {
   if (relative.empty()) return true;
   const std::wstring first = relative.begin()->wstring();
-  for (const wchar_t* kept : {L"userdata", L"config", L"photos", kGameFolder})
+  for (const wchar_t* kept : {L"userdata", L"config", L"photos", L"save-backup", kGameFolder})
     if (_wcsicmp(first.c_str(), kept) == 0) return true;
   return false;
 }
@@ -2310,10 +2310,46 @@ void EnableDpiAwareness() {
 
 }  // namespace
 
+// Copies userdata (saves, album photos, achievements) to save-backup every time the launcher
+// opens, replacing the previous backup. The shader cache is skipped: it is rebuilt by the game.
+// The copy goes to a temporary folder first, so a failed copy never destroys the last backup.
+void BackupSaves() {
+  namespace fs = std::filesystem;
+  const fs::path source = g_root / L"userdata";
+  std::error_code ec;
+  if (!fs::is_directory(source, ec)) return;
+  const fs::path backup = g_root / L"save-backup";
+  const fs::path staging = g_root / L"save-backup.tmp";
+  fs::remove_all(staging, ec);
+  bool ok = fs::create_directories(staging, ec) || fs::is_directory(staging, ec);
+  for (auto it = fs::recursive_directory_iterator(source, ec); ok && !ec && it != fs::recursive_directory_iterator();
+       it.increment(ec)) {
+    const fs::path relative = fs::relative(it->path(), source, ec);
+    if (ec) { ok = false; break; }
+    if (_wcsicmp(relative.begin()->c_str(), L"cache") == 0) {
+      if (it->is_directory()) it.disable_recursion_pending();
+      continue;
+    }
+    const fs::path target = staging / relative;
+    if (it->is_directory(ec)) {
+      fs::create_directories(target, ec);
+    } else {
+      fs::copy_file(it->path(), target, fs::copy_options::overwrite_existing, ec);
+    }
+    if (ec) ok = false;
+  }
+  if (ok && !ec) {
+    fs::remove_all(backup, ec);
+    if (!ec) fs::rename(staging, backup, ec);
+  }
+  if (!ok || ec) fs::remove_all(staging, ec);
+}
+
 int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
   EnableDpiAwareness();
   g_root = ExecutableDirectory();
   CleanUpAfterUpdate();
+  BackupSaves();
   GdiplusStartupInput gdiplus_input;
   ULONG_PTR gdiplus_token = 0;
   GdiplusStartup(&gdiplus_token, &gdiplus_input, nullptr);

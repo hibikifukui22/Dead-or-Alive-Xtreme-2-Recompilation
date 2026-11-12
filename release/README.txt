@@ -1,4 +1,4 @@
-DOAX2 Recomp v1.1.7 - native PC port of Dead or Alive Xtreme 2 (Xbox 360)
+DOAX2 Recomp v1.1.8 - native PC port of Dead or Alive Xtreme 2 (Xbox 360)
 
 This package does NOT include the game. You need your own copy of
 Dead or Alive Xtreme 2 for the Xbox 360 (retail disc, title ID 544307D2).
@@ -19,7 +19,8 @@ Dead or Alive Xtreme 2 for the Xbox 360 (retail disc, title ID 544307D2).
    Press ? next to an option for an explanation; changes are saved
    automatically in config\launcher.ini.
 3. Saves are stored in the "userdata" folder next to the launcher, and photos
-   saved to your PC in the "photos" folder.
+   saved to your PC in the "photos" folder. Every time the launcher opens it
+   copies "userdata" to "save-backup", replacing the previous backup.
 
 Requirements: Windows 10/11 x64, a DirectX 12 graphics card (RTX 2060 Super /
 RX 6600 XT class or faster for 1080p, see the project page). The Visual C++ runtime

@@ -17332,10 +17332,10 @@ index 8f2fcb0..b89a9fe 100644
  void GraphicsSystem::ClearCaches() {
 diff --git a/src/graphics/hires_capture.cpp b/src/graphics/hires_capture.cpp
 new file mode 100644
-index 0000000..d2bbd4c
+index 0000000..c0c1abc
 --- /dev/null
 +++ b/src/graphics/hires_capture.cpp
-@@ -0,0 +1,543 @@
+@@ -0,0 +1,580 @@
 +/**
 + * @file        graphics/hires_capture.cpp
 + * @brief       Full-resolution copies of one resolve (e.g. an in-game photo)
@@ -17408,8 +17408,15 @@ index 0000000..d2bbd4c
 +  uint32_t scale = 1;  // draw resolution scale it was rendered at (min of x and y)
 +};
 +
++// The raw scaled bytes of the last armed frame resolve. Store (GPU thread) only copies them; the
++// untiling, crop and PNG encoding run on the writer thread so a photo doesn't stall a frame.
++struct Pending {
++  Resolve resolve;
++  std::vector<uint8_t> raw;
++  std::chrono::steady_clock::time_point time;
++};
 +std::mutex g_mutex;
-+Image g_latest;
++Pending g_pending;
 +int32_t g_last_request = 0;
 +
 +uint32_t ApplyEndian(uint32_t v, xenos::Endian128 endian) {
@@ -17731,6 +17738,21 @@ index 0000000..d2bbd4c
 +// Set by ReadbackWanted for the resolve it was asked about (GPU thread only).
 +bool g_force_full = false;
 +
++// hires_resolve_capture_arm last consumed by a capture (GPU thread only).
++int32_t g_consumed_arm = 0;
++
++// Whether the title has armed a capture that no resolve has taken yet.
++bool ArmPending() {
++  static bool arm_seen = false;
++  const int32_t arm = REXCVAR_GET(hires_resolve_capture_arm);
++  if (!arm_seen) {
++    // The starting value (from the command line) arms nothing.
++    arm_seen = true;
++    g_consumed_arm = arm;
++  }
++  return arm != g_consumed_arm;
++}
++
 +// The album thumbnail: a 64x64 colour k_8_8_8_8 resolve made once per photo, just before the
 +// shot (DOAX2), read by the CPU and passed to XamContentSetThumbnail.
 +bool IsThumbnailResolve(const RegisterFile& regs) {
@@ -17744,8 +17766,14 @@ index 0000000..d2bbd4c
 +
 +bool ReadbackWanted(const RegisterFile& regs) {
 +  g_force_full = false;
++  const bool frame = IsFrameResolve(regs);
++  if (frame && REXCVAR_GET(hires_resolve_capture) && ArmPending()) {
++    // The frame the photo PNG is taken from: copy it in full (a resolve trimmed to the changed
++    // rectangle would leave the rest of the PNG black) and wait for it. Once per photo.
++    g_force_full = true;
++  }
 +  if (!REXCVAR_GET(readback_resolve_frame_only)) return true;
-+  if (IsFrameResolve(regs)) return true;
++  if (frame) return true;
 +  if (IsThumbnailResolve(regs)) {
 +    // One-off: it needs this resolve's data, not the previous one that "fast" readback
 +    // returns, so wait for the GPU (rare and tiny).
@@ -17767,16 +17795,8 @@ index 0000000..d2bbd4c
 +  const uint32_t rows = uint32_t(std::max(1, REXCVAR_GET(hires_resolve_capture_height)));
 +  // Armed captures: only the first matching resolve after each arm. Nothing is kept until the
 +  // title changes the arm value - keeping every frame costs a full GPU sync per resolve.
-+  static int32_t consumed_arm = 0;
-+  static bool arm_seen = false;
-+  const int32_t arm = REXCVAR_GET(hires_resolve_capture_arm);
-+  if (!arm_seen) {
-+    // The starting value (from the command line) arms nothing.
-+    arm_seen = true;
-+    consumed_arm = arm;
-+  }
-+  if (arm == consumed_arm) return false;
-+  consumed_arm = arm;
++  if (!ArmPending()) return false;
++  g_consumed_arm = REXCVAR_GET(hires_resolve_capture_arm);
 +  out.dest_base = regs[XE_GPU_REG_RB_COPY_DEST_BASE];
 +  out.pitch = pitch.copy_dest_pitch;
 +  out.height = pitch.copy_dest_height;
@@ -17791,8 +17811,8 @@ index 0000000..d2bbd4c
 +  return true;
 +}
 +
-+void Store(const Resolve& r, const uint8_t* data, size_t size) {
-+  if (!data || !size) return;
++namespace {
++Image Untile(const Resolve& r, const uint8_t* data, size_t size) {
 +  const uint32_t sx = r.scale_x, sy = r.scale_y, sxy = sx * sy;
 +  Image image;
 +  image.width = r.width * sx;
@@ -17847,15 +17867,30 @@ index 0000000..d2bbd4c
 +    image.width = w;
 +    image.height = h;
 +  }
-+  image.time = std::chrono::steady_clock::now();
 +  image.scale = std::min(sx, sy);
 +  static int logged = 0;
 +  if (logged++ < 8)
 +    REXGPU_INFO("hires capture: kept {}x{} (scale {}x{}, {} of {} pixels, endian {}, swap {})",
 +                image.width, image.height, sx, sy, filled, uint64_t(image.width) * image.height,
 +                uint32_t(r.endian), r.swap);
++  return image;
++}
++
++void UntileAndWrite(std::filesystem::path path, Pending pending, bool fxaa, bool supersample) {
++  Image image = Untile(pending.resolve, pending.raw.data(), pending.raw.size());
++  pending.raw = {};
++  WritePng(std::move(path), std::move(image), fxaa, supersample);
++}
++}  // namespace
++
++void Store(const Resolve& r, const uint8_t* data, size_t size) {
++  if (!data || !size) return;
++  Pending pending;
++  pending.resolve = r;
++  pending.raw.assign(data, data + size);
++  pending.time = std::chrono::steady_clock::now();
 +  std::lock_guard lock(g_mutex);
-+  g_latest = std::move(image);
++  g_pending = std::move(pending);
 +}
 +
 +void Poll() {
@@ -17863,27 +17898,37 @@ index 0000000..d2bbd4c
 +  if (request == g_last_request) return;
 +  g_last_request = request;
 +  const std::string path = REXCVAR_GET(hires_resolve_capture_path);
-+  Image image;
++  if (path.empty()) return;
++  Pending pending;
 +  {
 +    std::lock_guard lock(g_mutex);
-+    image = g_latest;
++    pending = std::move(g_pending);
++    g_pending = {};
 +  }
-+  if (path.empty()) return;
-+  if (image.rgb.empty() || std::chrono::steady_clock::now() - image.time > std::chrono::seconds(60)) {
++  if (pending.raw.empty() ||
++      std::chrono::steady_clock::now() - pending.time > std::chrono::seconds(60)) {
 +    REXGPU_WARN("hires capture: no recent capture for {}", path);
 +    return;
 +  }
-+  std::thread(WritePng, std::filesystem::u8path(path), std::move(image),
++  std::thread(UntileAndWrite, std::filesystem::u8path(path), std::move(pending),
 +              REXCVAR_GET(hires_resolve_capture_fxaa), REXCVAR_GET(hires_resolve_capture_supersample))
 +      .detach();
 +}
 +
 +}  // namespace rex::graphics::hires_capture
 diff --git a/src/graphics/pipeline/render_target/cache.cpp b/src/graphics/pipeline/render_target/cache.cpp
-index 953c5fd..6d505fe 100644
+index 953c5fd..a86d015 100644
 --- a/src/graphics/pipeline/render_target/cache.cpp
 +++ b/src/graphics/pipeline/render_target/cache.cpp
-@@ -27,6 +27,19 @@
+@@ -20,6 +20,7 @@
+ #include <rex/assert.h>
+ #include <rex/cvar.h>
+ #include <rex/graphics/flags.h>
++#include <rex/graphics/hires_capture.h>
+ #include <rex/graphics/pipeline/render_target/cache.h>
+ #include <rex/graphics/register_file.h>
+ #include <rex/graphics/registers.h>
+@@ -27,6 +28,19 @@
  #include <rex/graphics/xenos.h>
  #include <rex/logging.h>
  #include <rex/math.h>
@@ -17903,7 +17948,7 @@ index 953c5fd..6d505fe 100644
  
  REXCVAR_DEFINE_BOOL(mrt_edram_used_range_clamp_to_min, true, "GPU",
                      "Clamp MRT EDRAM used range to minimum");
-@@ -400,6 +413,10 @@ void RenderTargetCache::BeginFrame() {
+@@ -400,6 +414,10 @@ void RenderTargetCache::BeginFrame() {
  bool RenderTargetCache::Update(bool is_rasterization_done,
                                 reg::RB_DEPTHCONTROL normalized_depth_control,
                                 uint32_t normalized_color_mask, const Shader& vertex_shader) {
@@ -17914,7 +17959,7 @@ index 953c5fd..6d505fe 100644
    const RegisterFile& regs = register_file();
    bool interlock_barrier_only = GetPath() == Path::kPixelShaderInterlock;
  
-@@ -656,6 +673,18 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -656,6 +674,18 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
                                          ? edram_bases_sorted[i + 1].first
                                          : (xenos::kEdramTileCount + edram_bases_sorted[0].first)) -
                                         rt_base);
@@ -17933,7 +17978,7 @@ index 953c5fd..6d505fe 100644
    }
  
    if (interlock_barrier_only) {
-@@ -678,6 +707,36 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -678,6 +708,36 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
      }
    }
  
@@ -17970,7 +18015,7 @@ index 953c5fd..6d505fe 100644
    // From now on ownership transfers should succeed for simplicity and
    // consistency, even if they fail in the implementation (just ignore that and
    // draw with whatever contents currently are in the render target in this
-@@ -686,8 +745,19 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -686,8 +746,19 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
    for (uint32_t i = 0; i < edram_bases_sorted_count; ++i) {
      const std::pair<uint32_t, uint32_t>& rt_base_index = edram_bases_sorted[i];
      uint32_t rt_bit_index = rt_base_index.second;
@@ -17991,7 +18036,7 @@ index 953c5fd..6d505fe 100644
    }
  
    if (interlock_barrier_only) {
-@@ -762,12 +832,17 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
+@@ -762,12 +833,17 @@ bool RenderTargetCache::Update(bool is_rasterization_done,
  }
  
  uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
@@ -18010,7 +18055,7 @@ index 953c5fd..6d505fe 100644
      return 0;
    }
    uint32_t rts_used = 0;
-@@ -777,12 +852,15 @@ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
+@@ -777,12 +853,15 @@ uint32_t RenderTargetCache::GetLastUpdateBoundRenderTargets(
        if (depth_and_color_formats_out) {
          depth_and_color_formats_out[i] = 0;
        }
@@ -18026,7 +18071,7 @@ index 953c5fd..6d505fe 100644
    }
    return rts_used;
  }
-@@ -836,6 +914,32 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
+@@ -836,6 +915,32 @@ void RenderTargetCache::GetHostDepthStoreRectangleInfo(
    group_count_y_out = (transfer_rectangle.height_pixels * pixel_size_y) >> 3;
  }
  
@@ -18059,7 +18104,7 @@ index 953c5fd..6d505fe 100644
  void RenderTargetCache::GetResolveCopyRectanglesToDump(
      uint32_t base, uint32_t row_length, uint32_t rows, uint32_t pitch,
      std::vector<ResolveCopyDumpRectangle>& rectangles_out) const {
-@@ -845,6 +949,37 @@ void RenderTargetCache::GetResolveCopyRectanglesToDump(
+@@ -845,6 +950,37 @@ void RenderTargetCache::GetResolveCopyRectanglesToDump(
    if (!row_length || !rows) {
      return;
    }
@@ -18097,7 +18142,7 @@ index 953c5fd..6d505fe 100644
    auto get_rectangles_in_extent = [&](uint32_t extent_start, uint32_t extent_end,
                                        uint32_t range_local_offset) {
      // Collect render targets owning ranges within the specified rectangle. The
-@@ -1385,4 +1520,345 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
+@@ -1385,4 +1521,360 @@ void RenderTargetCache::ChangeOwnership(RenderTargetKey dest, uint32_t start_til
    }
  }
  
@@ -18317,6 +18362,11 @@ index 953c5fd..6d505fe 100644
 +  Doax2ResolveRecord& record = doax2_incremental_shared.records[key];
 +  bool partial = false, skip = false;
 +  draw_util::Doax2ResolveClip clip;
++  // A one-off resolve the CPU reads back (a photo's album thumbnail) is always copied in full:
++  // its draws are identical from photo to photo (only the texture differs), and if their
++  // estimated bounds miss the target, the copy would be skipped and the CPU would read the
++  // previous photo's thumbnail (issue #13, Vulkan).
++  const bool force_full = hires_capture::ForceFullReadback();
 +  if (record.valid && std::memcmp(&record.info, &resolve_info, sizeof(resolve_info)) == 0) {
 +    uint32_t base, row_length, rows, pitch;
 +    resolve_info.GetCopyEdramTileSpan(base, row_length, rows, pitch);
@@ -18364,6 +18414,16 @@ index 953c5fd..6d505fe 100644
 +      }
 +      partial = clip.left > 0 || clip.top > 0 || clip.right < width - 7 || clip.bottom < height - 7;
 +    }
++  }
++  if (force_full && (skip || partial)) {
++    static int logged = 0;
++    if (logged++ < 16) {
++      REXGPU_INFO("DOAX2 incremental resolve: read-back resolve at {:08X} would have been {}; "
++                  "copied in full",
++                  resolve_info.copy_dest_extent_start, skip ? "skipped" : "clipped");
++    }
++    skip = false;
++    partial = false;
 +  }
 +  record.info = resolve_info;
 +  record.epoch = doax2_incremental_shared.epoch++;
@@ -25984,7 +26044,7 @@ index 3027dc8..cea8e55 100644
                                             const Shader& vertex_shader) {
    SCOPE_profile_cpu_f("gpu");
 diff --git a/src/graphics/vulkan/command_processor.cpp b/src/graphics/vulkan/command_processor.cpp
-index 001f36b..ea2a4ab 100644
+index 001f36b..51c3b1f 100644
 --- a/src/graphics/vulkan/command_processor.cpp
 +++ b/src/graphics/vulkan/command_processor.cpp
 @@ -11,9 +11,12 @@
@@ -26956,17 +27016,18 @@ index 001f36b..ea2a4ab 100644
  
    // Invalidate textures in memexported memory and watch for changes.
    if (!memexport_ranges_.empty()) {
-@@ -4391,7 +5056,8 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4391,7 +5056,9 @@ bool VulkanCommandProcessor::IssueCopy() {
    }
  
    ReadbackResolveMode readback_mode = GetReadbackResolveMode(REXCVAR_GET(vulkan_readback_resolve));
 -  if (readback_mode == ReadbackResolveMode::kDisabled) {
-+  if (readback_mode == ReadbackResolveMode::kDisabled ||
-+      !hires_capture::ReadbackWanted(*register_file_)) {
++  const bool wanted = readback_mode != ReadbackResolveMode::kDisabled &&
++                      hires_capture::ReadbackWanted(*register_file_);
++  if (!wanted) {
      uint32_t written_address, written_length;
      return render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                           written_address, written_length);
-@@ -4400,6 +5066,17 @@ bool VulkanCommandProcessor::IssueCopy() {
+@@ -4400,12 +5067,23 @@ bool VulkanCommandProcessor::IssueCopy() {
    return IssueCopy_ReadbackResolvePath();
  }
  
@@ -26984,7 +27045,14 @@ index 001f36b..ea2a4ab 100644
  bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    const ui::vulkan::VulkanDevice* const vulkan_device = GetVulkanDevice();
    const ui::vulkan::VulkanDevice::Functions& dfn = vulkan_device->functions();
-@@ -4423,6 +5100,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+   const VkDevice device = vulkan_device->device();
+ 
+-  uint32_t written_address, written_length;
++  uint32_t written_address = 0, written_length = 0;
+   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_, written_address,
+                                      written_length)) {
+     return false;
+@@ -4423,6 +5101,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    if (readback_mode == ReadbackResolveMode::kDisabled) {
      return true;
    }
@@ -26992,7 +27060,7 @@ index 001f36b..ea2a4ab 100644
  
    auto ensure_readback_slot = [&](ReadbackBuffer& readback, uint32_t index, uint32_t size) -> bool {
      if (readback.buffers[index] != VK_NULL_HANDLE && size <= readback.sizes[index] &&
-@@ -4473,6 +5151,12 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4473,6 +5152,12 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
    };
  
    bool is_scaled = texture_cache_->IsDrawResolutionScaled();
@@ -27005,7 +27073,48 @@ index 001f36b..ea2a4ab 100644
    uint64_t resolve_key = MakeReadbackResolveKey(written_address, written_length);
    ReadbackBuffer& readback = readback_buffers_[resolve_key];
    readback.last_used_frame = frame_current_;
-@@ -4633,6 +5317,61 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4515,9 +5200,19 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+     }
+ 
+     VkBuffer scaled_resolve_buffer = texture_cache_->scaled_resolve_buffer();
+-    if (scaled_resolve_buffer == VK_NULL_HANDLE || scaled_start > uint64_t(UINT32_MAX)) {
++    if (scaled_resolve_buffer == VK_NULL_HANDLE) {
+       return true;
+     }
++    // The scaled resolve buffer is larger than 4 GB at 3x (512 MB x 9), and the downscale shader
++    // takes a 32-bit source offset: bind the buffer from an aligned offset just below the resolve
++    // and pass only the remainder, so resolves high in guest memory (the photo frame and album
++    // thumbnail, issue #13) are read back too.
++    const VkDeviceSize source_alignment =
++        std::max<VkDeviceSize>(vulkan_device->properties().minStorageBufferOffsetAlignment, 4);
++    const VkDeviceSize source_binding_offset = scaled_start - scaled_start % source_alignment;
++    const uint32_t source_offset_in_binding = uint32_t(scaled_start - source_binding_offset);
++    const VkDeviceSize source_binding_range =
++        rex::align<VkDeviceSize>(source_offset_in_binding + scaled_length, 4);
+ 
+     uint32_t downscale_buffer_size = AlignReadbackBufferSize(written_length);
+     if (downscale_buffer_size > resolve_downscale_buffer_size_) {
+@@ -4561,8 +5256,8 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+ 
+     VkDescriptorBufferInfo buffer_infos[2] = {};
+     buffer_infos[0].buffer = scaled_resolve_buffer;
+-    buffer_infos[0].offset = 0;
+-    buffer_infos[0].range = VK_WHOLE_SIZE;
++    buffer_infos[0].offset = source_binding_offset;
++    buffer_infos[0].range = source_binding_range;
+     buffer_infos[1].buffer = resolve_downscale_buffer_;
+     buffer_infos[1].offset = 0;
+     buffer_infos[1].range = written_length;
+@@ -4601,7 +5296,7 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+     constants.scale_y = texture_cache_->draw_resolution_scale_y();
+     constants.pixel_size_log2 = pixel_size_log2;
+     constants.tile_count = tile_count;
+-    constants.source_offset_bytes = uint32_t(scaled_start);
++    constants.source_offset_bytes = source_offset_in_binding;
+     constants.half_pixel_offset = (REXCVAR_GET(readback_resolve_half_pixel_offset) &&
+                                    (constants.scale_x > 1 || constants.scale_y > 1))
+                                       ? 1u
+@@ -4633,6 +5328,61 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      readback_region.size = written_length;
      deferred_command_buffer_.CmdVkCopyBuffer(resolve_downscale_buffer_,
                                               readback.buffers[write_index], 1, &readback_region);
@@ -27067,7 +27176,7 @@ index 001f36b..ea2a4ab 100644
    } else {
      shared_memory_->Use(VulkanSharedMemory::Usage::kRead);
      SubmitBarriers(true);
-@@ -4685,6 +5424,23 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
+@@ -4685,6 +5435,23 @@ bool VulkanCommandProcessor::IssueCopy_ReadbackResolvePath() {
      }
    }
  
@@ -27091,7 +27200,7 @@ index 001f36b..ea2a4ab 100644
    readback.current_index = 1 - readback.current_index;
    return true;
  }
-@@ -5501,6 +6257,7 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
+@@ -5501,6 +6268,7 @@ void VulkanCommandProcessor::ClearTransientDescriptorPools() {
    }
    single_transient_descriptors_used_.clear();
    transient_descriptor_allocator_storage_buffer_.Reset();
@@ -27099,7 +27208,7 @@ index 001f36b..ea2a4ab 100644
    transient_descriptor_allocator_uniform_buffer_.Reset();
  }
  
-@@ -5702,6 +6459,8 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
+@@ -5702,6 +6470,8 @@ void VulkanCommandProcessor::UpdateDynamicState(const draw_util::ViewportInfo& v
    scissor_rect.extent.width = scissor.extent[0];
    scissor_rect.extent.height = scissor.extent[1];
    SetScissor(scissor_rect);
@@ -27108,7 +27217,7 @@ index 001f36b..ea2a4ab 100644
  
    if (render_target_cache_->GetPath() == RenderTargetCache::Path::kHostRenderTargets) {
      // Depth bias.
-@@ -6045,6 +6804,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6045,6 +6815,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
        flags |= SpirvShaderTranslator::kSysFlag_FSIDepthStencilEarlyWrite;
      }
    }
@@ -27118,7 +27227,7 @@ index 001f36b..ea2a4ab 100644
    dirty |= system_constants_.flags != flags;
    system_constants_.flags = flags;
  
-@@ -6074,7 +6836,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6074,7 +6847,9 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
          guest_index_endian == xenos::Endian::k8in32 ? xenos::Endian::k8in16 : xenos::Endian::kNone;
    }
    xenos::Endian index_endian =
@@ -27129,7 +27238,7 @@ index 001f36b..ea2a4ab 100644
            ? guest_index_endian
            : primitive_processing_result.host_shader_index_endian;
    dirty |= system_constants_.vertex_index_endian != index_endian;
-@@ -6084,6 +6848,11 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
+@@ -6084,6 +6859,11 @@ void VulkanCommandProcessor::UpdateSystemConstantValues(
             primitive_processing_result.line_loop_closing_index;
    system_constants_.line_loop_closing_index = primitive_processing_result.line_loop_closing_index;
  
@@ -29937,6 +30046,52 @@ index 2b93005..e493601 100644
      memory::PageAccess cur_access;
      size_t page_length = memory::page_size();
      memory::QueryProtect(fault_host_address, page_length, cur_access);
+diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
+index bd6c797..05f2292 100644
+--- a/src/system/xam/content_manager.cpp
++++ b/src/system/xam/content_manager.cpp
+@@ -9,8 +9,10 @@
+  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
+  */
+ 
++#include <algorithm>
+ #include <array>
+ #include <cstring>
++#include <filesystem>
+ #include <queue>
+ #include <string>
+ 
+@@ -170,6 +172,30 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
+     }
+   }
+ 
++  // DOAX2: at boot the game looks for its save files (ups.dat, rds.dat) in a single 64-item
++  // enumeration batch that also holds its album photos (*.ptc). In name order the photos come
++  // first, so with more than 62 photos the saves fell off the end and the game created a new,
++  // empty save over the old one. List save files (.dat) first, then the rest newest first.
++  // (The album itself reads up to 512 items.)
++  auto is_save = [](const XCONTENT_AGGREGATE_DATA& d) {
++    const std::string name = d.file_name();
++    return name.size() >= 4 && name.compare(name.size() - 4, 4, ".dat") == 0;
++  };
++  std::vector<std::pair<XCONTENT_AGGREGATE_DATA, std::filesystem::file_time_type>> keyed;
++  keyed.reserve(result.size());
++  for (auto& d : result) {
++    std::error_code ec;
++    auto t = std::filesystem::last_write_time(package_root / rex::to_path(d.file_name()), ec);
++    keyed.emplace_back(std::move(d), ec ? std::filesystem::file_time_type::min() : t);
++  }
++  std::stable_sort(keyed.begin(), keyed.end(), [&](const auto& x, const auto& y) {
++    const bool sx = is_save(x.first), sy = is_save(y.first);
++    if (sx != sy) return sx;
++    return !sx && x.second > y.second;
++  });
++  result.clear();
++  for (auto& k : keyed) result.emplace_back(std::move(k.first));
++
+   return result;
+ }
+ 
 diff --git a/src/ui/CMakeLists.txt b/src/ui/CMakeLists.txt
 index 5bd3dc5..4b888f3 100644
 --- a/src/ui/CMakeLists.txt
