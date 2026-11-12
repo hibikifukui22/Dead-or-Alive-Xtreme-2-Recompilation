@@ -30047,7 +30047,7 @@ index 2b93005..e493601 100644
      size_t page_length = memory::page_size();
      memory::QueryProtect(fault_host_address, page_length, cur_access);
 diff --git a/src/system/xam/content_manager.cpp b/src/system/xam/content_manager.cpp
-index bd6c797..05f2292 100644
+index bd6c797..6faae6b 100644
 --- a/src/system/xam/content_manager.cpp
 +++ b/src/system/xam/content_manager.cpp
 @@ -9,8 +9,10 @@
@@ -30061,33 +30061,19 @@ index bd6c797..05f2292 100644
  #include <queue>
  #include <string>
  
-@@ -170,6 +172,30 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
+@@ -170,6 +172,16 @@ std::vector<XCONTENT_AGGREGATE_DATA> ContentManager::ListContent(uint32_t device
      }
    }
  
 +  // DOAX2: at boot the game looks for its save files (ups.dat, rds.dat) in a single 64-item
 +  // enumeration batch that also holds its album photos (*.ptc). In name order the photos come
 +  // first, so with more than 62 photos the saves fell off the end and the game created a new,
-+  // empty save over the old one. List save files (.dat) first, then the rest newest first.
-+  // (The album itself reads up to 512 items.)
-+  auto is_save = [](const XCONTENT_AGGREGATE_DATA& d) {
++  // empty save over the old one. Move the save files (.dat) to the front and keep everything
++  // else in its original (name) order, which the photo album relies on.
++  std::stable_partition(result.begin(), result.end(), [](const XCONTENT_AGGREGATE_DATA& d) {
 +    const std::string name = d.file_name();
 +    return name.size() >= 4 && name.compare(name.size() - 4, 4, ".dat") == 0;
-+  };
-+  std::vector<std::pair<XCONTENT_AGGREGATE_DATA, std::filesystem::file_time_type>> keyed;
-+  keyed.reserve(result.size());
-+  for (auto& d : result) {
-+    std::error_code ec;
-+    auto t = std::filesystem::last_write_time(package_root / rex::to_path(d.file_name()), ec);
-+    keyed.emplace_back(std::move(d), ec ? std::filesystem::file_time_type::min() : t);
-+  }
-+  std::stable_sort(keyed.begin(), keyed.end(), [&](const auto& x, const auto& y) {
-+    const bool sx = is_save(x.first), sy = is_save(y.first);
-+    if (sx != sy) return sx;
-+    return !sx && x.second > y.second;
 +  });
-+  result.clear();
-+  for (auto& k : keyed) result.emplace_back(std::move(k.first));
 +
    return result;
  }

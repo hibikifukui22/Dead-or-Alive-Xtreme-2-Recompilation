@@ -1744,6 +1744,21 @@ inline void Request(uint8_t* base) {
 // and encodes it (8286FAE0 writes the "PTC+MSHM" data). Arm the GPU's
 // full-resolution capture of the next frame resolve here; the save below
 // writes it out.
+// Photo album thumbnails: 82740B58 reads each photo's thumbnail with XamContentGetThumbnail
+// (wrapper 82781150) into a 16 KB buffer at 834A3AC8, passing the buffer size in a static at
+// 82E71D10 that it never resets. XamContentGetThumbnail writes the returned thumbnail's size
+// there, so the next, slightly larger thumbnail failed with "insufficient buffer" and the album
+// showed the previous photo's thumbnail again (repeated and stale thumbnails, issue #13). Reset
+// the size to the buffer's real capacity before every album thumbnail read.
+REX_EXTERN(__imp__sub_82781150);
+REX_HOOK_RAW(sub_82781150) {
+  constexpr uint32_t kAlbumThumbnailBuffer = 0x834A3AC8;
+  constexpr uint32_t kAlbumThumbnailSize = 0x82E71D10;
+  constexpr uint32_t kAlbumThumbnailCapacity = 16384;
+  if (ctx.r5.u32 == kAlbumThumbnailBuffer && ctx.r6.u32 == kAlbumThumbnailSize)
+    REX_STORE_U32(kAlbumThumbnailSize, kAlbumThumbnailCapacity);
+  __imp__sub_82781150(ctx, base);
+}
 REX_EXTERN(__imp__sub_824110C0);
 REX_HOOK_RAW(sub_824110C0) {
   if (REXCVAR_GET(doax2_hires_photos)) {

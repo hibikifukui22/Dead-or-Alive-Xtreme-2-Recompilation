@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.1.9
+
+- **Fixed repeated and wrong thumbnails in the photo album** (issue #13, all
+  renderers): the album reads each thumbnail into a 16 KB buffer and passes
+  its size in a variable it never resets. XamContentGetThumbnail stores the
+  returned thumbnail's size there, so the next, slightly larger thumbnail
+  failed as "buffer too small" and the album showed the previous photo's
+  thumbnail again. The size is now reset to the real 16 KB before every
+  album thumbnail read. The saved thumbnails were always correct, so all
+  existing photos show correctly again.
+- Photos keep their original order in the content list (save files still
+  come first, so the save-overwrite fix from 1.1.8 is unchanged).
+
 ## 1.1.8
 
 - **Fixed saves being overwritten when you have more than 62 album photos:**
