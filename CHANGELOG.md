@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.0
+
+- **Vulkan: much smoother while new shaders compile.** When a draw needed a
+  pipeline that wasn't built yet, the renderer compiled a placeholder
+  pipeline on the spot, skipped the draw, waited for the real pipeline at the
+  end of the submission and then dropped the frame, so camera pans that kept
+  revealing new materials ran at about half rate. Draws now bind the pipeline
+  when the submission is executed (it already waited for the creation
+  threads), so there are no placeholder pipelines, skipped draws or dropped
+  frames (vulkan_async_deferred_pipelines, default on). Fresh shader cache,
+  pool scene: 446 -> 224 pipeline compiles, 27 -> 0 dropped frames, worst
+  frame 159 -> 97 ms.
+
 ## 1.1.9
 
 - **Fixed repeated and wrong thumbnails in the photo album** (issue #13, all
