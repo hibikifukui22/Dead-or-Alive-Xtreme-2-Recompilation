@@ -8669,6 +8669,13 @@ REX_HOOK_RAW(sub_825A0FD8) {
       static uint32_t lines = 0;
       if (++lines <= 200)
         REXLOG_INFO("DOAX2 screen: {} update={:08X}", int32_t(int8_t(REX_LOAD_U8(0x834BCFE0))), function);
+      {
+        // GPU Performance Test (vulkan_diag_cycle): run the phases only in game scenes, not on
+        // the title screen (0) or the main menu (22), so the menus stay usable.
+        const int32_t screen = int32_t(int8_t(REX_LOAD_U8(0x834BCFE0)));
+        rex::cvar::SetFlagByName("vulkan_diag_cycle_armed",
+                                 (screen != 0 && screen != 22) ? "true" : "false");
+      }
       if (function == 0x825A0420 && rex::audio::GetTitlePlaylistDiagnostics().playing) {
         rex::audio::StopTitlePlaylist();
         REXLOG_INFO("DOAX2 title screen: title music stopped");
@@ -9869,6 +9876,29 @@ DOAX2_PROFILE_PRESENT_HOOK(sub_82711270, timing_swap_surface)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82711D60, timing_swap_edram)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82704210, timing_swap_fence)
 DOAX2_PROFILE_PRESENT_HOOK(sub_82704C28, timing_swap_wait)
+// D3D GPU wait step (inside the fence / ring buffer waits): the game busy-polls the GPU
+// with a few no-op delays per check, which keeps a CPU core at full clock for most of every
+// frame. On Android, after polling for a short time (short waits, such as the many syncs in
+// the swimsuit menu, stay as fast as before), sleep briefly between checks (the step returns
+// 1 while still waiting).
+REX_EXTERN(__imp__sub_827054E8);
+REX_HOOK_RAW(sub_827054E8) {
+  __imp__sub_827054E8(ctx, base);
+#if defined(__ANDROID__)
+  if (ctx.r3.u32 == 1) {
+    // Calls of one wait are close together; a longer gap means a new wait.
+    thread_local std::chrono::steady_clock::time_point wait_start{}, last_step{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_step > std::chrono::microseconds(500)) {
+      wait_start = now;
+    }
+    if (now - wait_start >= std::chrono::microseconds(150)) {
+      std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+    last_step = std::chrono::steady_clock::now();
+  }
+#endif
+}
 DOAX2_PROFILE_PRESENT_HOOK(sub_8270AA18, timing_swap_retire)
 DOAX2_PROFILE_PRESENT_HOOK(sub_827008B8, timing_swap_finalize)
 

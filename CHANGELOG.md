@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.2.1
+
+- **Fixed the picture freezing after Alt+Tab on Vulkan** (issue #19): if the
+  game drew a frame while its window was minimized, the renderer lost its
+  connection to the window and waited for a window resize to reconnect.
+  Coming back at the same size (always the case in fullscreen) sends no
+  resize, so the picture stayed frozen for good while the game kept running
+  and responding to the controller. The renderer now reconnects when the
+  window is restored or regains focus.
+- **Vulkan: the final screen pass is no longer rebuilt every frame.** A
+  missing setting made the renderer think the pipeline that draws the game
+  image to the screen was out of date on every frame, so it recreated it and
+  waited for the previous frame to finish first. In GPU-heavy scenes this
+  could cost a lot of frame rate.
+- **Vulkan: lighter shaders.** Shaders with jumps and loops are now compiled
+  as plain structured code instead of a jump-table loop, texture sampling
+  uses the GPU's own level-of-detail calculation where possible, and the
+  auto-exposure pass sums its 14,400 points in one step instead of blending
+  them one by one. Pool scene: GPU time 5.3 -> 4.9 ms per frame, with
+  identical images.
+- **Less CPU work in the GPU command thread (D3D12 and Vulkan):** shader
+  constants rewritten with the same values no longer invalidate the constant
+  buffers, shader loads reuse their content hash instead of rehashing the
+  whole shader every time, draw-extent estimates are cached, and memory pages
+  that change every frame are no longer hashed before every upload.
+- Vulkan: the driver's pipeline cache is saved in the background once no new
+  pipelines are being created, and only when it has changed.
+- After updating, Vulkan recompiles its shaders once (the shader cache format
+  changed), so the first visit to each area may show brief extra loading.
+
 ## 1.2.0
 
 - **Vulkan: much smoother while new shaders compile.** When a draw needed a
