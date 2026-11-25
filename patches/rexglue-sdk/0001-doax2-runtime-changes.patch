@@ -3740,6 +3740,31 @@ index 04856ee..ccfd612 100644
    std::array<VkPipeline, kLoadShaderCount> load_pipelines_{};
    std::array<VkPipeline, kLoadShaderCount> load_pipelines_scaled_{};
  
+diff --git a/include/rex/input/input_system.h b/include/rex/input/input_system.h
+index 1cb3faa..1406923 100644
+--- a/include/rex/input/input_system.h
++++ b/include/rex/input/input_system.h
+@@ -11,6 +11,7 @@
+  */
+ 
+ #include <memory>
++#include <mutex>
+ #include <vector>
+ 
+ #include <rex/input/device_assignment.h>
+@@ -56,6 +57,12 @@ class InputSystem : public system::IInputSystem {
+ 
+   rex::ui::Window* window_ = nullptr;
+ 
++  // Guards the device list and the drivers: the guest polls from its own threads while the
++  // UI thread polls too (XAM message box dialogs read player 1's pad). RefreshDevices rebuilds
++  // devices_ on every call, so unguarded concurrent calls corrupted the vector (issue #18).
++  // Recursive in case a driver or assignment calls back into the input system.
++  std::recursive_mutex mutex_;
++
+   std::vector<std::unique_ptr<InputDriver>> drivers_;
+ 
+   std::unique_ptr<DeviceAssignment> assignment_;
 diff --git a/include/rex/kernel/xam/apps/xmp_app.h b/include/rex/kernel/xam/apps/xmp_app.h
 index d939d62..6586268 100644
 --- a/include/rex/kernel/xam/apps/xmp_app.h
@@ -32914,7 +32939,7 @@ index ecbd940..ca411bb 100644
  }
  
 diff --git a/src/input/input_system.cpp b/src/input/input_system.cpp
-index 813bb1c..7b53d2c 100644
+index 813bb1c..d7673ee 100644
 --- a/src/input/input_system.cpp
 +++ b/src/input/input_system.cpp
 @@ -10,7 +10,11 @@
@@ -33139,7 +33164,47 @@ index 813bb1c..7b53d2c 100644
  }  // namespace
  
  InputSystem::InputSystem(rex::ui::Window* window) : window_(window) {}
-@@ -233,6 +433,13 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+@@ -48,6 +248,7 @@ X_STATUS InputSystem::Setup() {
+ }
+ 
+ void InputSystem::Shutdown() {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   // device_owners_ holds raw driver pointers.
+   devices_.clear();
+   device_owners_.clear();
+@@ -55,6 +256,7 @@ void InputSystem::Shutdown() {
+ }
+ 
+ void InputSystem::AddDriver(std::unique_ptr<InputDriver> driver) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   drivers_.push_back(std::move(driver));
+ }
+ 
+@@ -72,6 +274,7 @@ void InputSystem::SetActiveCallback(std::function<bool()> callback) {
+ }
+ 
+ void InputSystem::SetDeviceAssignment(std::unique_ptr<DeviceAssignment> assignment) {
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   assignment_ = std::move(assignment);
+   if (assignment_) {
+     assignment_->OnDevicesChanged(devices_);
+@@ -187,6 +390,7 @@ const DeviceInfo* InputSystem::DeviceInfoFor(DeviceId id) const {
+ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+                                       X_INPUT_CAPABILITIES* out_caps) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!out_caps || !assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -214,6 +418,7 @@ X_RESULT InputSystem::GetCapabilities(uint32_t user_index, uint32_t flags,
+ 
+ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -233,6 +438,13 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
      if (driver->GetDeviceState(id, &state) != X_ERROR_SUCCESS) {
        continue;
      }
@@ -33153,7 +33218,7 @@ index 813bb1c..7b53d2c 100644
      active_devices_.Observe(user_index, id, state.gamepad);
      if (!any) {
        merged = state;
-@@ -242,6 +449,16 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+@@ -242,6 +454,16 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
      }
    }
  
@@ -33168,6 +33233,22 @@ index 813bb1c..7b53d2c 100644
 +    }
 +  }
    if (!any) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -253,6 +475,7 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+ 
+ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!assignment_) {
+     return X_ERROR_DEVICE_NOT_CONNECTED;
+   }
+@@ -295,6 +518,7 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
+ X_RESULT InputSystem::GetKeystroke(uint32_t user_index, uint32_t flags,
+                                    X_INPUT_KEYSTROKE* out_keystroke) {
+   SCOPE_profile_cpu_f("hid");
++  std::lock_guard<std::recursive_mutex> lock(mutex_);
+   if (!assignment_) {
      return X_ERROR_DEVICE_NOT_CONNECTED;
    }
 diff --git a/src/input/sdl/sdl_input_driver.cpp b/src/input/sdl/sdl_input_driver.cpp

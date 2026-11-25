@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.2
+
+- **Fixed the game closing after pressing Start at the title screen**
+  (issue #18): when the "Please choose where you would like to save the
+  game" prompt is open, it reads the controller at the same time as the
+  game. The input system rebuilt its device list on every controller read
+  without any locking, so the two reads could corrupt the list and Windows
+  closed the game (exception 0xc000001d in rexruntime.dll). It depended on
+  timing, which is why it only happened on some PCs, whatever the renderer,
+  window mode, folder or antivirus settings. Controller reads are now
+  serialized, which also covers the movie-skip check that reads the
+  controller from another game thread.
+
 ## 1.2.1
 
 - **Fixed the picture freezing after Alt+Tab on Vulkan** (issue #19): if the
